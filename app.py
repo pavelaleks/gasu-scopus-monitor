@@ -7,17 +7,26 @@ import pandas as pd
 import requests
 import streamlit as st
 from docx import Document
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AFFILIATION_ID = "60105869"
+AFFILIATION_NAME = "Gorno-Altaisk State University"
 ENV_PATH = Path(__file__).with_name(".env")
 
 
 def load_api_key() -> str | None:
-    if "SCOPUS_API_KEY" in st.secrets:
-        return st.secrets["SCOPUS_API_KEY"]
-    load_dotenv(ENV_PATH)
+    try:
+        if "SCOPUS_API_KEY" in st.secrets:
+            return st.secrets["SCOPUS_API_KEY"]
+    except Exception:
+        pass
+    if load_dotenv:
+        load_dotenv(ENV_PATH)
     return os.getenv("SCOPUS_API_KEY")
 
 
@@ -144,32 +153,90 @@ def format_apa(record: dict) -> str:
     return " ".join(parts).strip()
 
 
-def build_query(mode: str, last: str, first: str, orcid: str, date_filter: dict) -> str:
+def build_query(
+    mode: str,
+    last: str,
+    orcid: str,
+    date_filter: dict,
+    only_gasu: bool,
+) -> str:
+    def quoted(value: str) -> str:
+        cleaned = (value or "").strip().replace('"', "")
+        return f"\"{cleaned}\""
+
     if mode == "Мониторинг ГАГУ":
-        base = f"AF-ID({AFFILIATION_ID})"
+        base = f"AFFIL({quoted(AFFILIATION_NAME)})"
+        if date_filter:
+            if date_filter["mode"] == "current":
+                year = date_filter["year"]
+                base = f"{base} AND PUBYEAR IS {year}"
+            else:
+                year_start = date_filter["year_start"]
+                year_end = date_filter["year_end"]
+                base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+        return base
+
+    if orcid:
+        base = f"ORCID({quoted(orcid)})"
     else:
-        if orcid:
-            base = f"ORCID({orcid})"
-        else:
-            base = f"AUTHLASTNAME({last}) AND AUTHFIRST({first})"
+        base = f"AUTH({quoted(last)})"
+
     if date_filter:
-        base = f"{base} AND {date_filter['query']}"
+        year_start = date_filter["year_start"]
+        year_end = date_filter["year_end"]
+        base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+
+    if only_gasu:
+        base = f"{base} AND AFFIL({quoted(AFFILIATION_NAME)})"
+
     return base
 
 
 def make_date_filter(mode: str, start_year: int | None, end_year: int | None) -> dict | None:
     current_year = datetime.now().year
     if mode == "current":
-        return {"label": f"{current_year}", "query": f"PUBYEAR = {current_year}"}
+        return {"mode": "current", "year": current_year, "year_start": current_year, "year_end": current_year}
     if mode == "last5":
         start = current_year - 4
-        return {"label": f"{start}-{current_year}", "query": f"PUBYEAR >= {start} AND PUBYEAR <= {current_year}"}
+        return {"mode": "range", "year": current_year, "year_start": start, "year_end": current_year}
     if mode == "range" and start_year and end_year:
-        return {"label": f"{start_year}-{end_year}", "query": f"PUBYEAR >= {start_year} AND PUBYEAR <= {end_year}"}
+        return {"mode": "range", "year": start_year, "year_start": start_year, "year_end": end_year}
     return None
 
 
-def fetch_scopus(query: str, api_key: str, max_results: int) -> list[dict]:
+def affiliation_items(entry: dict) -> list[dict]:
+    affil = entry.get("affiliation")
+    if isinstance(affil, list):
+        return [item for item in affil if isinstance(item, dict)]
+    if isinstance(affil, dict):
+        return [affil]
+    return []
+
+
+def extract_affiliation(entry: dict) -> str:
+    items = affiliation_items(entry)
+    for item in items:
+        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
+        if name.lower() == AFFILIATION_NAME.lower():
+            return name
+    if items:
+        item = items[0]
+        return (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
+    affil = entry.get("affiliation")
+    if isinstance(affil, str):
+        return affil.strip()
+    return ""
+
+
+def has_gasu_affiliation(entry: dict) -> bool:
+    for item in affiliation_items(entry):
+        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
+        if name.lower() == AFFILIATION_NAME.lower():
+            return True
+    return False
+
+
+def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     records = []
     start = 0
@@ -177,7 +244,16 @@ def fetch_scopus(query: str, api_key: str, max_results: int) -> list[dict]:
     total = None
     while True:
         params = {"query": query, "count": page_size, "start": start}
-        response = requests.get(API_URL, headers=headers, params=params, timeout=30)
+        last_error = None
+        for _ in range(3):
+            try:
+                response = requests.get(API_URL, headers=headers, params=params, timeout=60)
+                last_error = None
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+        if last_error:
+            raise RuntimeError(f"Scopus API timeout: {last_error}") from last_error
         if response.status_code != 200:
             raise RuntimeError(response.text)
         payload = response.json()
@@ -185,24 +261,30 @@ def fetch_scopus(query: str, api_key: str, max_results: int) -> list[dict]:
             total = int(payload["search-results"].get("opensearch:totalResults", 0))
         entries = payload["search-results"].get("entry", [])
         for entry in entries:
+            if f'AFFIL("{AFFILIATION_NAME}")' in query and not has_gasu_affiliation(entry):
+                continue
             authors = parse_authors(entry)
+            cover_date = (entry.get("prism:coverDate") or "").strip()
             record = {
                 "title": (entry.get("dc:title") or "").strip(),
                 "journal": (entry.get("prism:publicationName") or "").strip(),
-                "year": (entry.get("prism:coverDate") or "")[:4],
+                "year": cover_date[:4],
+                "cover_date": cover_date,
                 "volume": (entry.get("prism:volume") or "").strip(),
                 "issue": (entry.get("prism:issueIdentifier") or "").strip(),
                 "pages": (entry.get("prism:pageRange") or "").strip(),
                 "doi": (entry.get("prism:doi") or "").strip(),
                 "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                 "authors": authors,
+                "affiliation": extract_affiliation(entry),
             }
             records.append(record)
-            if len(records) >= max_results:
-                return records
+            if max_results and len(records) >= max_results:
+                break
         start += page_size
         if start >= total or not entries:
             break
+    records.sort(key=lambda item: item.get("cover_date") or "", reverse=True)
     return records
 
 
@@ -215,11 +297,32 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Название": rec["title"],
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
+                "Организация": rec.get("affiliation", ""),
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }
         )
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df.index = range(1, len(df) + 1)
+    return df
+
+
+def sort_records_for_bibliography(records: list[dict], date_filter: dict | None) -> list[dict]:
+    def author_key(rec: dict) -> str:
+        authors = rec.get("authors") or []
+        if authors:
+            surname = (authors[0].get("surname") or "").strip().lower()
+            if surname:
+                return surname
+        return format_authors_gost(authors).lower()
+
+    def year_key(rec: dict) -> int:
+        year = rec.get("year") or ""
+        return int(year) if year.isdigit() else 0
+
+    if date_filter and date_filter.get("mode") == "range":
+        return sorted(records, key=lambda rec: (author_key(rec), year_key(rec)))
+    return sorted(records, key=author_key)
 
 
 def build_docx(records: list[dict], fmt: str) -> BytesIO:
@@ -277,15 +380,12 @@ quick_check = st.button(
 mode = st.radio("Режим поиска", ["Мониторинг ГАГУ", "Поиск по автору"], horizontal=True)
 
 author_last = ""
-author_first = ""
 author_orcid = ""
+only_gasu = False
 if mode == "Поиск по автору":
-    col1, col2 = st.columns(2)
-    with col1:
-        author_last = st.text_input("Фамилия автора")
-    with col2:
-        author_first = st.text_input("Имя автора")
+    author_last = st.text_input("Фамилия автора")
     author_orcid = st.text_input("ORCID (если есть)")
+    only_gasu = st.checkbox("Только аффилиация ГАГУ", value=False)
 
 time_filter = st.radio(
     "Период",
@@ -300,8 +400,6 @@ if time_filter == "Диапазон лет":
         start_year = st.number_input("С", min_value=1900, max_value=2100, value=2020, step=1)
     with col2:
         end_year = st.number_input("По", min_value=1900, max_value=2100, value=datetime.now().year, step=1)
-
-max_results = st.selectbox("Сколько результатов показать", [25, 50, 100, 200], index=1)
 
 search_clicked = st.button("Найти публикации")
 
@@ -322,21 +420,29 @@ if search_clicked:
     if not api_key:
         st.error("Нужен API-ключ Scopus. Введите его в боковой панели.")
         st.stop()
-    if mode == "Поиск по автору" and not author_orcid and (not author_last or not author_first):
-        st.error("Для поиска по автору укажите фамилию и имя или ORCID.")
+    if mode == "Поиск по автору" and not author_orcid and not author_last:
+        st.error("Для поиска по автору укажите фамилию или ORCID.")
         st.stop()
-    query = build_query(mode, author_last, author_first, author_orcid, date_filter)
+    query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
     with st.spinner("Идет поиск в Scopus..."):
         try:
-            records = fetch_scopus(query, api_key, int(max_results))
+            records = fetch_scopus_data(query, api_key, None)
         except Exception as exc:
             st.error("Ошибка запроса к Scopus API.")
             st.code(str(exc))
             st.stop()
 
     if not records:
-        st.info("Публикации не найдены.")
+        st.info("Статей по данному запросу не найдено.")
         st.stop()
+
+    st.session_state["records"] = records
+    st.session_state["date_filter"] = date_filter
+
+if "records" in st.session_state and st.session_state["records"]:
+    records = st.session_state["records"]
+    active_date_filter = st.session_state.get("date_filter")
+    records_for_list = sort_records_for_bibliography(records, active_date_filter)
 
     st.subheader("Результаты")
     df = records_to_dataframe(records)
@@ -345,12 +451,13 @@ if search_clicked:
     st.subheader("Готовый список литературы")
     format_choice = st.selectbox("Формат", ["ГОСТ 7.0.5", "APA 7th Edition"])
     formatted_list = [
-        format_gost(rec) if format_choice == "ГОСТ 7.0.5" else format_apa(rec) for rec in records
+        format_gost(rec) if format_choice == "ГОСТ 7.0.5" else format_apa(rec)
+        for rec in records_for_list
     ]
     st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
 
-    docx_buffer = build_docx(records, format_choice)
-    xlsx_buffer = build_xlsx(records)
+    docx_buffer = build_docx(records_for_list, format_choice)
+    xlsx_buffer = build_xlsx(records_for_list)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -367,3 +474,6 @@ if search_clicked:
             file_name="scopus_publications.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+st.markdown("---")
+st.caption("© Алексеев П.В., pavel.alekseev.gasu@gmail.com, Горно-Алтайский государственный университет")

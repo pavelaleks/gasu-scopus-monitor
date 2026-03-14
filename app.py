@@ -244,19 +244,6 @@ def extract_affiliation(entry: dict) -> str:
     return ""
 
 
-def extract_all_affiliations(entry: dict) -> str:
-    items = affiliation_items(entry)
-    names = []
-    for item in items:
-        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-        if name:
-            names.append(name)
-    if names:
-        return "; ".join(dict.fromkeys(names))
-    affil = entry.get("affiliation")
-    if isinstance(affil, str):
-        return affil.strip()
-    return ""
 
 
 def has_gasu_affiliation(entry: dict) -> bool:
@@ -308,7 +295,6 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                 "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                 "authors": authors,
                 "affiliation": extract_affiliation(entry),
-                "affiliations_all": extract_all_affiliations(entry),
             }
             records.append(record)
             if max_results and len(records) >= max_results:
@@ -330,7 +316,6 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
                 "Организация": rec.get("affiliation", ""),
-                "Организации (все)": rec.get("affiliations_all", ""),
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }

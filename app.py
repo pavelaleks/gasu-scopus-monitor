@@ -15,7 +15,17 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AFFILIATION_ID = "60105869"
-AFFILIATION_NAME = "Gorno-Altaisk State University"
+AFFILIATION_NAMES = [
+    "Gorno-Altaisk State University",
+    "GORNO ALTAISK STATE UNIV",
+    "GORNO-ALTAYSK  STATE UNIV",
+    "GORNO-ALTAY STATE UNIV",
+    "GASU",
+    "Gorno Alta State Univ",
+    "Gorno-Altaysk State University",
+    "Gorno Altay State Univ",
+]
+AFFILIATION_NAME_SET = {" ".join(name.strip().lower().split()) for name in AFFILIATION_NAMES}
 ENV_PATH = Path(__file__).with_name(".env")
 
 
@@ -164,8 +174,10 @@ def build_query(
         cleaned = (value or "").strip().replace('"', "")
         return f"\"{cleaned}\""
 
+    affil_query = " OR ".join([f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES])
+
     if mode == "Мониторинг ГАГУ":
-        base = f"AFFIL({quoted(AFFILIATION_NAME)})"
+        base = f"({affil_query})"
         if date_filter:
             if date_filter["mode"] == "current":
                 year = date_filter["year"]
@@ -187,7 +199,7 @@ def build_query(
         base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
 
     if only_gasu:
-        base = f"{base} AND AFFIL({quoted(AFFILIATION_NAME)})"
+        base = f"{base} AND ({affil_query})"
 
     return base
 
@@ -213,11 +225,15 @@ def affiliation_items(entry: dict) -> list[dict]:
     return []
 
 
+def normalize_affiliation_name(name: str) -> str:
+    return " ".join((name or "").strip().lower().split())
+
+
 def extract_affiliation(entry: dict) -> str:
     items = affiliation_items(entry)
     for item in items:
         name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-        if name.lower() == AFFILIATION_NAME.lower():
+        if normalize_affiliation_name(name) in AFFILIATION_NAME_SET:
             return name
     if items:
         item = items[0]
@@ -228,10 +244,25 @@ def extract_affiliation(entry: dict) -> str:
     return ""
 
 
+def extract_all_affiliations(entry: dict) -> str:
+    items = affiliation_items(entry)
+    names = []
+    for item in items:
+        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    if names:
+        return "; ".join(dict.fromkeys(names))
+    affil = entry.get("affiliation")
+    if isinstance(affil, str):
+        return affil.strip()
+    return ""
+
+
 def has_gasu_affiliation(entry: dict) -> bool:
     for item in affiliation_items(entry):
         name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-        if name.lower() == AFFILIATION_NAME.lower():
+        if normalize_affiliation_name(name) in AFFILIATION_NAME_SET:
             return True
     return False
 
@@ -261,7 +292,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
             total = int(payload["search-results"].get("opensearch:totalResults", 0))
         entries = payload["search-results"].get("entry", [])
         for entry in entries:
-            if f'AFFIL("{AFFILIATION_NAME}")' in query and not has_gasu_affiliation(entry):
+            if "AFFIL(" in query and not has_gasu_affiliation(entry):
                 continue
             authors = parse_authors(entry)
             cover_date = (entry.get("prism:coverDate") or "").strip()
@@ -277,6 +308,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                 "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                 "authors": authors,
                 "affiliation": extract_affiliation(entry),
+                "affiliations_all": extract_all_affiliations(entry),
             }
             records.append(record)
             if max_results and len(records) >= max_results:
@@ -298,6 +330,7 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
                 "Организация": rec.get("affiliation", ""),
+                "Организации (все)": rec.get("affiliations_all", ""),
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }

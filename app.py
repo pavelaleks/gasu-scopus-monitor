@@ -11,6 +11,7 @@ import streamlit as st
 from docx import Document
 
 from gasu import build_query, format_affiliations, query_targets_gasu
+from auth import cookie_manager, logout, require_login
 
 try:
     from dotenv import load_dotenv
@@ -19,7 +20,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -37,6 +38,10 @@ def last_updated_label() -> str:
     except Exception:
         pass
     return APP_UPDATED_FALLBACK
+
+
+def running_on_streamlit_cloud() -> bool:
+    return Path("/mount/src").exists() or bool(os.getenv("STREAMLIT_SHARING_MODE"))
 
 
 def load_api_key() -> str | None:
@@ -323,24 +328,38 @@ def build_xlsx(records: list[dict]) -> BytesIO:
 
 
 st.set_page_config(page_title="Мониторинг публикаций Scopus", layout="wide")
+auth_cookies = cookie_manager()
+if not require_login(auth_cookies):
+    st.stop()
+
 st.title("Мониторинг публикаций Scopus")
 
 api_key = load_api_key()
+on_cloud = running_on_streamlit_cloud()
 with st.sidebar:
-    st.header("Доступ к Scopus")
+    st.header("Доступ")
+    if st.button("Выйти"):
+        logout(auth_cookies)
+    st.header("Scopus")
     if not api_key:
-        st.write("Введите API-ключ один раз. Он сохранится локально в `.env`.")
-        key_input = st.text_input("API-ключ Scopus", type="password")
-        if st.button("Сохранить ключ"):
-            if key_input.strip():
-                save_api_key(key_input)
-                st.success("Ключ сохранен. Перезагружаю...")
-                st.rerun()
-            else:
-                st.warning("Введите корректный ключ.")
+        if on_cloud:
+            st.warning(
+                "Добавьте `SCOPUS_API_KEY` в Settings → Secrets приложения. "
+                "На Cloud файл `.env` не сохраняется после перезапуска."
+            )
+        else:
+            st.write("Введите API-ключ один раз. Он сохранится локально в `.env`.")
+            key_input = st.text_input("API-ключ Scopus", type="password")
+            if st.button("Сохранить ключ"):
+                if key_input.strip():
+                    save_api_key(key_input)
+                    st.success("Ключ сохранен. Перезагружаю...")
+                    st.rerun()
+                else:
+                    st.warning("Введите корректный ключ.")
     else:
         st.success("API-ключ найден.")
-        st.caption("Используется ключ из `st.secrets` или `.env`.")
+        st.caption("Ключ берётся из Secrets (Cloud) или из `.env` (локально). Пользователи его не вводят.")
 
 st.markdown("Нажмите кнопку для быстрого мониторинга или выберите режим поиска.")
 st.caption(

@@ -30,6 +30,14 @@ SCOPUS_API_KEY = "ваш_ключ"
 ```
 5. Нажмите **Deploy**.
 
+## Чтобы приложение в Cloud не засыпало
+
+Streamlit Community Cloud усыпляет приложение примерно через **12 часов без визитов**. Пустые коммиты в git для этого не подходят: они засоряют историю, каждый раз пересобирают приложение и больше не считаются активностью.
+
+В репозитории стоит GitHub Action: раз в 6 часов headless-браузер открывает [gasu-scopus-monitor.streamlit.app](https://gasu-scopus-monitor.streamlit.app) и при необходимости нажимает «Yes, get this app back up!». Запуск вручную: вкладка Actions → **Keep Streamlit Alive** → **Run workflow**.
+
+Другой URL можно задать переменной репозитория `STREAMLIT_APP_URL` (Settings → Secrets and variables → Actions → Variables).
+
 ## Примечания
 - Приложение сначала ищет ключ в `st.secrets`, затем в локальном `.env`. Если не находит — показывает поле ввода.
 - Ключ хранится локально в `.env`, чтобы не вводить его каждый раз.

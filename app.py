@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -8,24 +9,14 @@ import requests
 import streamlit as st
 from docx import Document
 
+from gasu import build_query, format_affiliations, query_targets_gasu
+
 try:
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
-AFFILIATION_ID = "60105869"
-AFFILIATION_NAMES = [
-    "Gorno-Altaisk State University",
-    "GORNO ALTAISK STATE UNIV",
-    "GORNO-ALTAYSK  STATE UNIV",
-    "GORNO-ALTAY STATE UNIV",
-    "GASU",
-    "Gorno Alta State Univ",
-    "Gorno-Altaysk State University",
-    "Gorno Altay State Univ",
-]
-AFFILIATION_NAME_SET = {" ".join(name.strip().lower().split()) for name in AFFILIATION_NAMES}
 ENV_PATH = Path(__file__).with_name(".env")
 
 
@@ -75,6 +66,8 @@ def initials_from_given(given: str) -> str:
 def parse_authors(entry: dict) -> list[dict]:
     authors = []
     raw = entry.get("author")
+    if isinstance(raw, dict):
+        raw = [raw]
     if isinstance(raw, list):
         for item in raw:
             surname = (item.get("surname") or "").strip()
@@ -163,47 +156,6 @@ def format_apa(record: dict) -> str:
     return " ".join(parts).strip()
 
 
-def build_query(
-    mode: str,
-    last: str,
-    orcid: str,
-    date_filter: dict,
-    only_gasu: bool,
-) -> str:
-    def quoted(value: str) -> str:
-        cleaned = (value or "").strip().replace('"', "")
-        return f"\"{cleaned}\""
-
-    affil_query = " OR ".join([f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES])
-
-    if mode == "Мониторинг ГАГУ":
-        base = f"({affil_query})"
-        if date_filter:
-            if date_filter["mode"] == "current":
-                year = date_filter["year"]
-                base = f"{base} AND PUBYEAR IS {year}"
-            else:
-                year_start = date_filter["year_start"]
-                year_end = date_filter["year_end"]
-                base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
-        return base
-
-    if orcid:
-        base = f"ORCID({quoted(orcid)})"
-    else:
-        base = f"AUTH({quoted(last)})"
-
-    if date_filter:
-        year_start = date_filter["year_start"]
-        year_end = date_filter["year_end"]
-        base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
-
-    if only_gasu:
-        base = f"{base} AND ({affil_query})"
-
-    return base
-
-
 def make_date_filter(mode: str, start_year: int | None, end_year: int | None) -> dict | None:
     current_year = datetime.now().year
     if mode == "current":
@@ -216,42 +168,20 @@ def make_date_filter(mode: str, start_year: int | None, end_year: int | None) ->
     return None
 
 
-def affiliation_items(entry: dict) -> list[dict]:
-    affil = entry.get("affiliation")
-    if isinstance(affil, list):
-        return [item for item in affil if isinstance(item, dict)]
-    if isinstance(affil, dict):
-        return [affil]
-    return []
-
-
-def normalize_affiliation_name(name: str) -> str:
-    return " ".join((name or "").strip().lower().split())
-
-
-def extract_affiliation(entry: dict) -> str:
-    items = affiliation_items(entry)
-    for item in items:
-        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-        if normalize_affiliation_name(name) in AFFILIATION_NAME_SET:
-            return name
-    if items:
-        item = items[0]
-        return (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-    affil = entry.get("affiliation")
-    if isinstance(affil, str):
-        return affil.strip()
-    return ""
-
-
-
-
-def has_gasu_affiliation(entry: dict) -> bool:
-    for item in affiliation_items(entry):
-        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
-        if normalize_affiliation_name(name) in AFFILIATION_NAME_SET:
-            return True
-    return False
+def _scopus_get(headers: dict, params: dict) -> requests.Response:
+    last_error = None
+    response = None
+    for attempt in range(3):
+        try:
+            response = requests.get(API_URL, headers=headers, params=params, timeout=60)
+            last_error = None
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            time.sleep(1.5 * (attempt + 1))
+    if last_error or response is None:
+        raise RuntimeError(f"Scopus API timeout: {last_error}") from last_error
+    return response
 
 
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
@@ -260,47 +190,53 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
     start = 0
     page_size = 25
     total = None
+    view = "COMPLETE"
+    ensure_gasu = query_targets_gasu(query)
     while True:
         params = {"query": query, "count": page_size, "start": start}
-        last_error = None
-        for _ in range(3):
-            try:
-                response = requests.get(API_URL, headers=headers, params=params, timeout=60)
-                last_error = None
-                break
-            except requests.RequestException as exc:
-                last_error = exc
-        if last_error:
-            raise RuntimeError(f"Scopus API timeout: {last_error}") from last_error
+        if view == "COMPLETE":
+            params["view"] = "COMPLETE"
+        response = _scopus_get(headers, params)
+        if view == "COMPLETE" and response.status_code in {400, 401, 403}:
+            view = "STANDARD"
+            params.pop("view", None)
+            response = _scopus_get(headers, params)
         if response.status_code != 200:
             raise RuntimeError(response.text)
         payload = response.json()
+        search_results = payload.get("search-results") or {}
         if total is None:
-            total = int(payload["search-results"].get("opensearch:totalResults", 0))
-        entries = payload["search-results"].get("entry", [])
+            total = int(search_results.get("opensearch:totalResults", 0))
+        entries = search_results.get("entry") or []
+        if entries and isinstance(entries, dict):
+            entries = [entries]
         for entry in entries:
-            if "AFFIL(" in query and not has_gasu_affiliation(entry):
+            if not isinstance(entry, dict):
                 continue
-            authors = parse_authors(entry)
+            if entry.get("error"):
+                continue
             cover_date = (entry.get("prism:coverDate") or "").strip()
-            record = {
-                "title": (entry.get("dc:title") or "").strip(),
-                "journal": (entry.get("prism:publicationName") or "").strip(),
-                "year": cover_date[:4],
-                "cover_date": cover_date,
-                "volume": (entry.get("prism:volume") or "").strip(),
-                "issue": (entry.get("prism:issueIdentifier") or "").strip(),
-                "pages": (entry.get("prism:pageRange") or "").strip(),
-                "doi": (entry.get("prism:doi") or "").strip(),
-                "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
-                "authors": authors,
-                "affiliation": extract_affiliation(entry),
-            }
-            records.append(record)
+            records.append(
+                {
+                    "title": (entry.get("dc:title") or "").strip(),
+                    "journal": (entry.get("prism:publicationName") or "").strip(),
+                    "year": cover_date[:4],
+                    "cover_date": cover_date,
+                    "volume": (entry.get("prism:volume") or "").strip(),
+                    "issue": (entry.get("prism:issueIdentifier") or "").strip(),
+                    "pages": (entry.get("prism:pageRange") or "").strip(),
+                    "doi": (entry.get("prism:doi") or "").strip(),
+                    "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
+                    "authors": parse_authors(entry),
+                    "affiliation": format_affiliations(entry, ensure_gasu=ensure_gasu),
+                }
+            )
             if max_results and len(records) >= max_results:
                 break
         start += page_size
         if start >= total or not entries:
+            break
+        if max_results and len(records) >= max_results:
             break
     records.sort(key=lambda item: item.get("cover_date") or "", reverse=True)
     return records
@@ -315,7 +251,7 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Название": rec["title"],
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
-                "Организация": rec.get("affiliation", ""),
+                "Организации": rec.get("affiliation", ""),
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }
@@ -388,6 +324,10 @@ with st.sidebar:
         st.caption("Используется ключ из `st.secrets` или `.env`.")
 
 st.markdown("Нажмите кнопку для быстрого мониторинга или выберите режим поиска.")
+st.caption(
+    "Мониторинг ГАГУ включает статьи, где университет указан хотя бы как одна из "
+    "аффилиаций (в том числе вместе с другими организациями)."
+)
 
 quick_check = st.button(
     "Проверить новые статьи ГАГУ за текущий год",
@@ -456,6 +396,7 @@ if search_clicked:
 
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
+    st.session_state["query"] = query
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
@@ -463,8 +404,15 @@ if "records" in st.session_state and st.session_state["records"]:
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
 
     st.subheader("Результаты")
+    st.caption(
+        f"Найдено документов: {len(records)}. Статьи с несколькими аффилиациями "
+        "не отфильтровываются: если Scopus видит ГАГУ у любого автора, запись остаётся."
+    )
     df = records_to_dataframe(records)
     st.dataframe(df, use_container_width=True)
+    if st.session_state.get("query"):
+        with st.expander("Запрос Scopus"):
+            st.code(st.session_state["query"])
 
     st.subheader("Готовый список литературы")
     format_choice = st.selectbox("Формат", ["ГОСТ 7.0.5", "APA 7th Edition"])

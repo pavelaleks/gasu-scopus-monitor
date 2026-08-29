@@ -1,4 +1,5 @@
 import os
+import subprocess
 import time
 from datetime import datetime
 from io import BytesIO
@@ -18,6 +19,24 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
+APP_VERSION = "1.1.0"
+APP_UPDATED_FALLBACK = "29.08.2026"
+
+
+def last_updated_label() -> str:
+    try:
+        raw = subprocess.check_output(
+            ["git", "log", "-1", "--format=%cs"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            text=True,
+        ).strip()
+        if raw:
+            return datetime.strptime(raw, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except Exception:
+        pass
+    return APP_UPDATED_FALLBACK
 
 
 def load_api_key() -> str | None:
@@ -443,3 +462,4 @@ if "records" in st.session_state and st.session_state["records"]:
 
 st.markdown("---")
 st.caption("© Алексеев П.В., pavel.alekseev.gasu@gmail.com, Горно-Алтайский государственный университет")
+st.caption(f"Версия {APP_VERSION} · последнее обновление {last_updated_label()}")

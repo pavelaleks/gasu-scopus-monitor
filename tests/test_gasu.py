@@ -16,6 +16,8 @@ from gasu import (
     has_gasu_affiliation,
     match_authid_on_paper,
     needs_author_enrichment,
+    parse_author_retrieval,
+    parse_author_search_profile,
     parse_authors,
     pick_scopus_authid,
     record_has_gasu,
@@ -285,6 +287,50 @@ class MultiAffiliationTests(unittest.TestCase):
             ),
             ["57200000001", "11111111111"],
         )
+
+    def test_parse_author_search_and_retrieval_profile(self):
+        search = parse_author_search_profile(
+            {
+                "dc:identifier": "AUTHOR_ID:58102647800",
+                "orcid": "0000-0003-3680-1785",
+                "document-count": "13",
+                "cited-by-count": "10",
+                "preferred-name": {
+                    "surname": "Alekseev",
+                    "given-name": "Pavel",
+                    "initials": "P.V.",
+                },
+                "affiliation-current": {
+                    "affiliation-name": "Gorno-Altaisk State University",
+                    "affiliation-city": "Gorno-Altaysk",
+                },
+            }
+        )
+        self.assertEqual(search["authid"], "58102647800")
+        self.assertEqual(search["orcid"], "0000-0003-3680-1785")
+        self.assertEqual(search["documents"], 13)
+        self.assertEqual(search["cited_by"], 10)
+        self.assertIn("Gorno-Altaisk", search["profile_affil"])
+        retrieval = parse_author_retrieval(
+            {
+                "author-retrieval-response": [
+                    {
+                        "h-index": "2",
+                        "coauthor-count": "20",
+                        "coredata": {
+                            "dc:identifier": "AUTHOR_ID:58102647800",
+                            "orcid": "0000-0003-3680-1785",
+                            "document-count": "13",
+                            "cited-by-count": "10",
+                            "citation-count": "10",
+                        },
+                    }
+                ]
+            }
+        )
+        self.assertEqual(retrieval["h_index"], 2)
+        self.assertEqual(retrieval["documents"], 13)
+        self.assertEqual(retrieval["orcid"], "0000-0003-3680-1785")
 
 
 if __name__ == "__main__":

@@ -196,10 +196,25 @@ def author_stats(records: list[dict], *, only_gasu: bool = False, limit: int | N
                     "Q3": 0,
                     "Q4": 0,
                     "none": 0,
+                    "authid": "",
+                    "orcid": "",
+                    "h_index": None,
+                    "documents": None,
+                    "cited_by": None,
+                    "profile_affil": "",
                 }
                 buckets[key] = bucket
             bucket["names"][author_display_name(author)] += 1
             bucket["n"] += 1
+            if author.get("authid"):
+                bucket["authid"] = author.get("authid") or ""
+            if author.get("orcid"):
+                bucket["orcid"] = author.get("orcid") or ""
+            if author.get("profile_affil"):
+                bucket["profile_affil"] = author.get("profile_affil") or ""
+            for key in ("h_index", "documents", "cited_by"):
+                if author.get(key) is not None:
+                    bucket[key] = author.get(key)
             if quartile == "Нет":
                 bucket["none"] += 1
             else:
@@ -211,6 +226,12 @@ def author_stats(records: list[dict], *, only_gasu: bool = False, limit: int | N
         rows.append(
             {
                 "Автор": name,
+                "Author ID": bucket.get("authid") or "",
+                "ORCID": bucket.get("orcid") or "",
+                "h-индекс": "" if bucket.get("h_index") is None else bucket.get("h_index"),
+                "Документов": "" if bucket.get("documents") is None else bucket.get("documents"),
+                "Цитирований": "" if bucket.get("cited_by") is None else bucket.get("cited_by"),
+                "Аффилиация": bucket.get("profile_affil") or "",
                 "Публикаций": bucket["n"],
                 "Q1": bucket["Q1"],
                 "Q2": bucket["Q2"],
@@ -245,6 +266,12 @@ def _empty_author_bucket() -> dict:
         "given": "",
         "initials": "",
         "sample_scopus_id": "",
+        "orcid": "",
+        "h_index": None,
+        "documents": None,
+        "cited_by": None,
+        "citations": None,
+        "profile_affil": "",
     }
 
 
@@ -268,6 +295,11 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
         "given": bucket.get("given") or "",
         "initials": bucket.get("initials") or (parts[1] if len(parts) > 1 else ""),
         "sample_scopus_id": bucket.get("sample_scopus_id") or "",
+        "ORCID": bucket.get("orcid") or "",
+        "h-индекс": "" if bucket.get("h_index") is None else bucket.get("h_index"),
+        "Документов": "" if bucket.get("documents") is None else bucket.get("documents"),
+        "Цитирований": "" if bucket.get("cited_by") is None else bucket.get("cited_by"),
+        "Аффилиация": bucket.get("profile_affil") or "",
         "Всего Scopus": total,
         "С ГАГУ": gasu_n,
         "Q1": bucket["Q1"],
@@ -298,6 +330,13 @@ def _merge_author_bucket(dest: dict, src: dict) -> None:
         dest["initials"] = src["initials"]
     if src.get("sample_scopus_id") and not dest.get("sample_scopus_id"):
         dest["sample_scopus_id"] = src["sample_scopus_id"]
+    if src.get("orcid") and not dest.get("orcid"):
+        dest["orcid"] = src["orcid"]
+    if src.get("profile_affil") and not dest.get("profile_affil"):
+        dest["profile_affil"] = src["profile_affil"]
+    for key in ("h_index", "documents", "cited_by", "citations"):
+        if dest.get(key) is None and src.get(key) is not None:
+            dest[key] = src[key]
 
 
 def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
@@ -356,6 +395,13 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
             authid = (author.get("authid") or "").strip()
             if authid.isdigit():
                 bucket["authid"] = authid
+            if author.get("orcid") and not bucket.get("orcid"):
+                bucket["orcid"] = author.get("orcid") or ""
+            if author.get("profile_affil") and not bucket.get("profile_affil"):
+                bucket["profile_affil"] = author.get("profile_affil") or ""
+            for key in ("h_index", "documents", "cited_by", "citations"):
+                if bucket.get(key) is None and author.get(key) is not None:
+                    bucket[key] = author.get(key)
             sid = (rec.get("scopus_id") or "").strip()
             if sid and not bucket.get("sample_scopus_id"):
                 bucket["sample_scopus_id"] = sid
@@ -384,6 +430,11 @@ def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
     order = (
         "Автор",
         "Author ID",
+        "ORCID",
+        "h-индекс",
+        "Документов",
+        "Цитирований",
+        "Аффилиация",
         "Всего Scopus",
         "С ГАГУ",
         "Q1",

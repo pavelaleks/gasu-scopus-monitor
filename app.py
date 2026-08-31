@@ -14,8 +14,23 @@ from docx import Document
 from auth import cookie_manager, logout, require_login
 from gasu import (
     GASU_FOUNDED_YEAR,
-    author_ids,
+    apply_author_profile,
     author_id_query,
+    author_ids,
+    author_papers_query,
+    author_profile_query,
+    author_search_id,
+    build_query,
+    entry_belongs_to_gasu,
+    first_initial,
+    format_affiliations,
+    needs_author_enrichment,
+    parse_author_retrieval,
+    parse_author_search_profile,
+    parse_authors,
+    pick_scopus_authid,
+    query_targets_gasu,
+)
     author_papers_query,
     author_profile_query,
     build_query,
@@ -66,14 +81,15 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AUTHOR_URL = "https://api.elsevier.com/content/search/author"
-ABSTRACT_URL = "https://api.elsevier.com/content/abstract/scopus_id"
+AUTHOR_RETRIEVAL_URL = "https://api.elsevier.com/content/author/author_id"
+ABSTRACT_URL = "https://api.elsevier.com/content/abstract"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
     "prism:doi,prism:volume,prism:issueIdentifier,prism:pageRange,"
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -300,9 +316,9 @@ def _author_search_entries(query: str, api_key: str) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str) -> str:
+def resolve_author_profile(surname: str, initials: str, given: str, api_key: str) -> dict:
     if not (surname or "").strip():
-        return ""
+        return {}
     queries = [author_profile_query(surname, initials, given)]
     if first_initial(initials, given):
         queries.append(author_profile_query(surname, initials, given, with_initial=False))
@@ -311,62 +327,203 @@ def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str)
         if query in seen:
             continue
         seen.add(query)
-        picked = pick_scopus_authid(
-            _author_search_entries(query, api_key),
+        entries = _author_search_entries(query, api_key)
+        authid = pick_scopus_authid(
+            entries,
             surname=surname,
             initials=initials,
             given=given,
         )
-        if picked:
-            return picked
-    return ""
+        if not authid:
+            continue
+        for entry in entries:
+            if author_search_id(entry) == authid:
+                profile = parse_author_search_profile(entry)
+                if profile.get("authid"):
+                    return profile
+        return {"authid": authid}
+    return {}
 
 
-def fetch_paper_authors(scopus_id: str, api_key: str) -> list[dict]:
-    ident = (scopus_id or "").strip()
-    if not ident:
-        return []
+def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str) -> str:
+    return (resolve_author_profile(surname, initials, given, api_key).get("authid") or "").strip()
+
+
+def _abstract_targets(record: dict) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, ident: str) -> None:
+        ident = (ident or "").strip()
+        if not ident or (kind, ident) in seen:
+            return
+        seen.add((kind, ident))
+        targets.append((kind, ident))
+
+    sid = (record.get("scopus_id") or "").strip()
+    eid = (record.get("eid") or "").strip()
+    if sid.startswith("2-s2.0-"):
+        add("eid", sid)
+    elif sid:
+        add("scopus_id", sid)
+    add("eid", eid)
+    return targets
+
+
+def fetch_paper_authors(record: dict, api_key: str) -> tuple[list[dict], int]:
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
-    url = f"{ABSTRACT_URL}/{ident}"
-    for attempt in range(3):
-        try:
-            response = requests.get(url, headers=headers, timeout=45)
-        except requests.RequestException:
-            time.sleep(1.5 * (attempt + 1))
-            continue
-        if response.status_code == 429:
-            time.sleep(2 * (attempt + 1))
-            continue
-        if response.status_code != 200:
-            return []
-        try:
-            return parse_authors(response.json())
-        except Exception:
-            return []
-    return []
+    last_status = 0
+    for kind, ident in _abstract_targets(record):
+        url = f"{ABSTRACT_URL}/{kind}/{ident}"
+        for attempt in range(3):
+            try:
+                response = requests.get(url, headers=headers, timeout=45)
+            except requests.RequestException:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            last_status = response.status_code
+            if response.status_code == 429:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if response.status_code != 200:
+                break
+            try:
+                authors = parse_authors(response.json())
+            except Exception:
+                return [], last_status
+            if authors:
+                return authors, last_status
+            break
+    return [], last_status
 
 
 def enrich_record_authors(records: list[dict], api_key: str) -> int:
-    """По Scopus ID статьи добираем полный список авторов и их Author ID."""
+    """По Scopus ID статьи добираем полный список авторов и их Author ID, если API открыт."""
     todo = [rec for rec in records if needs_author_enrichment(rec)]
     if not todo:
         return 0
-    updated = 0
+    sample, status = fetch_paper_authors(todo[0], api_key)
+    if status in {401, 403, 404} and not sample:
+        return 0
+    if sample:
+        todo[0]["authors"] = sample
+        todo = todo[1:]
+    if not todo:
+        return 1 if sample else 0
+    updated = 1 if sample else 0
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {
-            pool.submit(fetch_paper_authors, rec.get("scopus_id") or "", api_key): rec
-            for rec in todo
-        }
+        futures = {pool.submit(fetch_paper_authors, rec, api_key): rec for rec in todo}
         for fut in as_completed(futures):
             rec = futures[fut]
             try:
-                authors = fut.result()
+                authors, _status = fut.result()
             except Exception:
                 continue
             if authors:
                 rec["authors"] = authors
                 updated += 1
     return updated
+
+
+def fetch_author_metrics(authid: str, api_key: str) -> dict:
+    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    if not ident:
+        return {}
+    headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
+    params = {"view": "METRICS"}
+    try:
+        response = requests.get(
+            f"{AUTHOR_RETRIEVAL_URL}/{ident}",
+            headers=headers,
+            params=params,
+            timeout=45,
+        )
+    except requests.RequestException:
+        return {}
+    if response.status_code in {400, 401, 403}:
+        try:
+            response = requests.get(
+                f"{AUTHOR_RETRIEVAL_URL}/{ident}",
+                headers=headers,
+                timeout=45,
+            )
+        except requests.RequestException:
+            return {}
+    if response.status_code != 200:
+        return {}
+    try:
+        return parse_author_retrieval(response.json())
+    except Exception:
+        return {}
+
+
+def stamp_author_profiles(records: list[dict], api_key: str) -> int:
+    """Author Search + Retrieval: Author ID, ORCID, h-index и счётчики профиля."""
+    groups: dict[str, list[dict]] = {}
+    for rec in records:
+        for author in rec.get("authors") or []:
+            surname = (author.get("surname") or "").strip()
+            if not surname:
+                continue
+            key = f"{surname.lower()}|{first_initial(author.get('initials') or '', author.get('given') or '').lower()}"
+            groups.setdefault(key, []).append(author)
+    if not groups:
+        return 0
+
+    def lookup(key: str) -> dict:
+        sample = groups[key][0]
+        if (sample.get("authid") or "").isdigit():
+            return {
+                "authid": sample.get("authid"),
+                "orcid": sample.get("orcid") or "",
+                "documents": sample.get("documents"),
+                "cited_by": sample.get("cited_by"),
+                "h_index": sample.get("h_index"),
+                "profile_affil": sample.get("profile_affil") or "",
+            }
+        surname = (sample.get("surname") or "").strip()
+        return resolve_author_profile(
+            surname,
+            sample.get("initials") or "",
+            sample.get("given") or "",
+            api_key,
+        )
+
+    profiles: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(lookup, key): key for key in groups}
+        for fut in as_completed(futures):
+            key = futures[fut]
+            try:
+                profile = fut.result() or {}
+            except Exception:
+                profile = {}
+            if profile.get("authid"):
+                profiles[key] = profile
+                for author in groups[key]:
+                    apply_author_profile(author, profile)
+
+    authids = sorted({(p.get("authid") or "") for p in profiles.values() if p.get("authid")})
+    if not authids:
+        return 0
+    metrics: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(fetch_author_metrics, authid, api_key): authid for authid in authids}
+        for fut in as_completed(futures):
+            authid = futures[fut]
+            try:
+                data = fut.result() or {}
+            except Exception:
+                data = {}
+            if data:
+                metrics[authid] = data
+    if metrics:
+        for rec in records:
+            for author in rec.get("authors") or []:
+                extra = metrics.get((author.get("authid") or "").strip())
+                if extra:
+                    apply_author_profile(author, extra)
+    return len({p.get("authid") for p in profiles.values() if p.get("authid")})
 
 
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
@@ -420,6 +577,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                     "pages": (entry.get("prism:pageRange") or "").strip(),
                     "doi": (entry.get("prism:doi") or "").strip(),
                     "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
+                    "eid": (entry.get("eid") or "").strip(),
                     "authors": parse_authors(entry),
                     "affiliation": format_affiliations(entry),
                     "issns": extract_issns(entry),
@@ -660,7 +818,8 @@ def render_report_block(
             st.caption(
                 f"{report_scope_label(records, university=True)}. "
                 "Соавторство считается: статья входит в показатель каждого автора. "
-                "Q1–Q4 — квартиль журнала этой статьи."
+                "Q1–Q4 — квартиль журнала этой статьи. "
+                "Author ID, ORCID, h-индекс, документы и цитирования — из профиля Scopus, не из среза."
             )
 
     if report.top_journals:
@@ -891,8 +1050,10 @@ if search_clicked:
         st.info("Статей по данному запросу не найдено.")
         st.stop()
 
-    with st.spinner("Дополняем авторов и Author ID по Scopus ID статей..."):
+    with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
         enrich_record_authors(records, api_key)
+    with st.spinner("Загружаем профили Scopus: Author ID, ORCID, h-индекс..."):
+        stamp_author_profiles(records, api_key)
 
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
@@ -960,14 +1121,14 @@ if "records" in st.session_state and st.session_state["records"]:
         counted = with_id
         if people and counted == 0:
             st.warning(
-                "У авторов в этом срезе нет Author ID, поэтому полный Scopus не уточнялся. "
+                "Профили Scopus не сопоставились (Author Search не вернул однозначный Author ID). "
                 "Порог посчитан по тем же статьям ГАГУ, что в списке ниже."
             )
         st.caption(
             "Счёт РНФ — по тем же статьям, что список литературы ниже. "
-            "Author ID берётся из карточки статьи (Scopus ID). "
-            "«Всего Scopus» затем уточняется запросом AU-ID: все работы профиля, не только ГАГУ. "
-            "P. и P.V. с одним Author ID — один человек. "
+            "Профиль автора (Author ID, ORCID, h-индекс, документы, цитирования) берётся из Author Search / Author Retrieval, "
+            "как на странице автора в Scopus. Если API не отдаёт поле — ячейка пустая. "
+            "«Всего Scopus» в окне РНФ уточняется запросом AU-ID. "
             "Это оценка для мониторинга, не экспертиза заявки."
             + (
                 f" Author ID есть у {counted} из {people} авторов."

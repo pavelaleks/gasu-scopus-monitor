@@ -219,6 +219,7 @@ class ReportTests(unittest.TestCase):
         by_name = {row["Автор"]: row for row in rows}
         self.assertEqual(by_name["Alekseev P.V."]["С ГАГУ"], 8)
         self.assertEqual(by_name["Alekseev P.V."]["Author ID"], "57200000001")
+        self.assertIn("ORCID", by_name["Alekseev P.V."])
         self.assertEqual(by_name["Kyrov V.A."]["С ГАГУ"], 8)
 
 

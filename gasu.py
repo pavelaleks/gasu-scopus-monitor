@@ -298,9 +298,15 @@ def first_initial(initials: str = "", given: str = "") -> str:
 
 
 def gasu_author_affil_clause() -> str:
-    """Author Search API понимает AFFIL, не AFFILORG."""
-    names = " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES)
-    return f"({names})"
+    """Author Search: короткие AFFIL, как на карточке автора Scopus."""
+    names = (
+        "Gorno-Altaisk State University",
+        "Gorno-Altaysk State University",
+        "Gorno-Altaisk",
+        "Gorno-Altaysk",
+        "Горно-Алтайск",
+    )
+    return "(" + " OR ".join(f"AFFIL({quoted(name)})" for name in names) + ")"
 
 
 def author_profile_query(
@@ -336,6 +342,113 @@ def author_papers_query(authid: str, date_filter: dict | None, only_gasu: bool) 
 
 
 def author_search_id(entry: dict) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    ident = str(entry.get("dc:identifier") or "")
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    if len(digits) >= 6:
+        return digits
+    return scopus_authid(entry)
+
+
+def _field_text(value: object) -> str:
+    if isinstance(value, dict):
+        return str(value.get("$") or value.get("#text") or "").strip()
+    return str(value or "").strip()
+
+
+def _field_int(value: object) -> int | None:
+    text = _field_text(value).replace(",", "").replace(" ", "")
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def parse_author_search_profile(entry: dict) -> dict:
+    """Поля Author Search: ID, ORCID, документы, цитирования, текущая аффилиация."""
+    if not isinstance(entry, dict):
+        return {}
+    pref = entry.get("preferred-name")
+    if not isinstance(pref, dict):
+        pref = {}
+    aff = entry.get("affiliation-current") or {}
+    if isinstance(aff, list):
+        aff = aff[0] if aff else {}
+    if not isinstance(aff, dict):
+        aff = {}
+    affil = " ".join(
+        part
+        for part in (
+            _field_text(aff.get("affiliation-name") or aff.get("affilname")),
+            _field_text(aff.get("affiliation-city")),
+        )
+        if part
+    )
+    return {
+        "authid": author_search_id(entry),
+        "orcid": _field_text(entry.get("orcid")),
+        "documents": _field_int(entry.get("document-count")),
+        "cited_by": _field_int(entry.get("cited-by-count")),
+        "citations": _field_int(entry.get("citation-count") or entry.get("citations-count")),
+        "h_index": _field_int(entry.get("h-index")),
+        "profile_affil": affil,
+        "surname": _field_text(pref.get("surname") or entry.get("surname")),
+        "given": _field_text(pref.get("given-name") or entry.get("given-name")),
+        "initials": _field_text(pref.get("initials") or entry.get("initials")),
+    }
+
+
+def parse_author_retrieval(payload: dict) -> dict:
+    """Поля Author Retrieval: h-index, ORCID, документы, цитирования."""
+    if not isinstance(payload, dict):
+        return {}
+    inner = payload.get("author-retrieval-response")
+    if isinstance(inner, list):
+        inner = inner[0] if inner else {}
+    if not isinstance(inner, dict):
+        inner = {}
+    core = inner.get("coredata") if isinstance(inner.get("coredata"), dict) else {}
+    profile = inner.get("author-profile") if isinstance(inner.get("author-profile"), dict) else {}
+    aff = profile.get("affiliation-current") or inner.get("affiliation-current") or {}
+    if isinstance(aff, dict) and "affiliation" in aff:
+        aff = aff.get("affiliation") or {}
+    if isinstance(aff, list):
+        aff = aff[0] if aff else {}
+    if not isinstance(aff, dict):
+        aff = {}
+    ipdoc = aff.get("ip-doc") if isinstance(aff.get("ip-doc"), dict) else {}
+    affil = _field_text(
+        aff.get("affiliation-name")
+        or aff.get("affilname")
+        or (ipdoc.get("afdispname") if isinstance(ipdoc, dict) else "")
+    )
+    orcid = _field_text(core.get("orcid") or inner.get("orcid") or profile.get("orcid"))
+    return {
+        "authid": author_search_id(core) or author_search_id(inner),
+        "orcid": orcid,
+        "documents": _field_int(core.get("document-count") or inner.get("document-count")),
+        "cited_by": _field_int(core.get("cited-by-count") or inner.get("cited-by-count")),
+        "citations": _field_int(
+            core.get("citation-count")
+            or core.get("citations-count")
+            or inner.get("citation-count")
+        ),
+        "h_index": _field_int(inner.get("h-index") or core.get("h-index") or profile.get("h-index")),
+        "coauthors": _field_int(inner.get("coauthor-count") or core.get("coauthor-count")),
+        "profile_affil": affil,
+    }
+
+
+def apply_author_profile(author: dict, profile: dict) -> dict:
+    if not isinstance(author, dict) or not isinstance(profile, dict):
+        return author
+    for key in ("authid", "orcid", "profile_affil"):
+        if profile.get(key) and not author.get(key):
+            author[key] = profile[key]
+    for key in ("documents", "cited_by", "citations", "h_index", "coauthors"):
+        if author.get(key) in (None, "") and profile.get(key) is not None:
+            author[key] = profile[key]
+    return author
     if not isinstance(entry, dict):
         return ""
     ident = str(entry.get("dc:identifier") or "")

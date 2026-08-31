@@ -25,6 +25,7 @@ from gasu import (
     pick_scopus_authid,
     profile_display_name,
     record_has_gasu,
+    record_sort_key,
     scopus_authid,
     truncated_author_paper_count,
 )
@@ -411,6 +412,18 @@ class MultiAffiliationTests(unittest.TestCase):
                 ]
             ),
             1,
+        )
+
+    def test_records_sort_by_surname_then_newest_year(self):
+        records = [
+            {"authors": [{"surname": "Safonova"}], "year": "2024", "title": "A"},
+            {"authors": [{"surname": "Alekseev"}], "year": "2023", "title": "Old"},
+            {"authors": [{"surname": "Alekseev"}], "year": "2025", "title": "New"},
+        ]
+        ordered = sorted(records, key=record_sort_key)
+        self.assertEqual(
+            [(item["authors"][0]["surname"], item["year"]) for item in ordered],
+            [("Alekseev", "2025"), ("Alekseev", "2023"), ("Safonova", "2024")],
         )
 
 

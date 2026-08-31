@@ -16,7 +16,6 @@ from gasu import (
     GASU_FOUNDED_YEAR,
     apply_author_profile,
     author_id_query,
-    author_ids,
     author_papers_query,
     author_profile_query,
     author_search_id,
@@ -34,6 +33,7 @@ from gasu import (
     profile_display_name,
     query_targets_gasu,
     quoted,
+    record_sort_key,
     truncated_author_paper_count,
 )
 from report import (
@@ -83,7 +83,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -681,40 +681,23 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
         rows.append(
             {
                 "Год": rec["year"],
-                "Название": rec["title"],
-                "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
-                "Author ID": "; ".join(author_ids(rec.get("authors"))),
-                "Организации": rec.get("affiliation", ""),
+                "Название": rec["title"],
+                "Квартиль": format_quartile_cell(rec),
+                "Журнал": rec["journal"],
                 "Область знаний": rec.get("subject_areas") or "",
-                "Квартиль SCImago": format_quartile_cell(rec),
-                "SJR": rec.get("scimago_sjr") if rec.get("scimago_sjr") != "" else "",
-                "Год SJR": rec.get("scimago_year") or "",
+                "Организации": rec.get("affiliation", ""),
                 "DOI": rec["doi"],
-                "Scopus ID статьи": rec["scopus_id"],
             }
         )
     df = pd.DataFrame(rows)
-    df.index = range(1, len(df) + 1)
+    if len(df):
+        df.index = range(1, len(df) + 1)
     return df
 
 
-def sort_records_for_bibliography(records: list[dict], date_filter: dict | None) -> list[dict]:
-    def author_key(rec: dict) -> str:
-        authors = rec.get("authors") or []
-        if authors:
-            surname = (authors[0].get("surname") or "").strip().lower()
-            if surname:
-                return surname
-        return format_authors_gost(authors).lower()
-
-    def year_key(rec: dict) -> int:
-        year = rec.get("year") or ""
-        return int(year) if year.isdigit() else 0
-
-    if date_filter and date_filter.get("mode") == "range":
-        return sorted(records, key=lambda rec: (author_key(rec), year_key(rec)))
-    return sorted(records, key=author_key)
+def sort_records_for_bibliography(records: list[dict], date_filter: dict | None = None) -> list[dict]:
+    return sorted(records, key=record_sort_key)
 
 
 def build_docx(records: list[dict], fmt: str) -> BytesIO:
@@ -1414,16 +1397,23 @@ if "records" in st.session_state and st.session_state["records"]:
         else:
             st.info("За этот период публикаций не найдено.")
 
-    df = records_to_dataframe(records)
-    st.dataframe(df, use_container_width=True)
-    st.caption(
-        "Scopus ID статьи — документ. Author ID — профиль автора в Scopus; по нему считается полный список работ. "
-        "Квартиль — лучший квартиль журнала в SCImago. Если у статьи год новее рейтинга, в скобках указан год SJR "
-        f"(сейчас до {load_meta().get('max_year') or '—'}). Это не оценка текста статьи."
+    df = records_to_dataframe(records_for_list)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        column_config={
+            "Год": st.column_config.TextColumn("Год", width="small"),
+            "Авторы": st.column_config.TextColumn("Авторы", width="medium"),
+            "Название": st.column_config.TextColumn("Название", width="large"),
+            "Квартиль": st.column_config.TextColumn("Квартиль", width="small"),
+        },
     )
-    if st.session_state.get("query"):
-        with st.expander("Запрос Scopus"):
-            st.code(st.session_state["query"])
+    st.caption(
+        "Строки — по фамилии первого автора, у одного автора новые годы сверху. "
+        "Квартиль — лучший квартиль журнала в SCImago. "
+        f"Если года статьи ещё нет в рейтинге, в скобках указан год SJR (сейчас до {load_meta().get('max_year') or '—'}). "
+        "Это не оценка текста статьи."
+    )
 
     st.subheader("Готовый список литературы")
     format_choice = st.selectbox("Формат", ["ГОСТ 7.0.5", "APA 7th Edition"])
@@ -1466,3 +1456,8 @@ if "records" in st.session_state and st.session_state["records"]:
 st.markdown("---")
 st.caption("© Алексеев П.В., pavel.alekseev.gasu@gmail.com, Горно-Алтайский государственный университет")
 st.caption(f"Версия {APP_VERSION} · последнее обновление {last_updated_label()}")
+if st.session_state.get("query"):
+    with st.sidebar:
+        with st.expander("Запрос Scopus"):
+            st.code(st.session_state["query"])
+            st.caption("Строка для Scopus API. В отчёт не входит.")

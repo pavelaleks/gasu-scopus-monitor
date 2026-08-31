@@ -731,6 +731,18 @@ def truncated_author_paper_count(records: list[dict]) -> int:
     return sum(1 for rec in records or [] if len(rec.get("authors") or []) < 2)
 
 
+def record_sort_key(record: dict) -> tuple[str, int, str]:
+    """Фамилия первого автора, затем год по убыванию, затем название."""
+    authors = record.get("authors") or []
+    surname = ""
+    if authors:
+        surname = (authors[0].get("surname") or "").strip().lower()
+    year = str(record.get("year") or "").strip()
+    year_n = int(year) if year.isdigit() else 0
+    title = (record.get("title") or "").strip().lower()
+    return (surname, -year_n, title)
+
+
 _AUTHOR_TEXT_TOKEN = re.compile(
     r"([A-Za-zА-ЯЁа-яё][A-Za-zА-ЯЁа-яё''-]*)"
     r"(?:\s*,\s*|\s+)"

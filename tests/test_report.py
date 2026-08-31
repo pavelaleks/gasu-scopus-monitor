@@ -6,8 +6,10 @@ from report import (
     report_area_png,
     report_chart_png,
     report_quartile_png,
+    report_scope_label,
     report_sentence,
     ru_publications,
+    top_authors,
 )
 
 
@@ -76,6 +78,48 @@ class ReportTests(unittest.TestCase):
         png = report_quartile_png([{"Квартиль": "Q1", "Публикаций": 10}, {"Квартиль": "Q2", "Публикаций": 5}])
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertLess(len(png), 120_000)
+
+    def test_scope_label_university_and_author(self):
+        records = [
+            {
+                "year": "2022",
+                "authors": [{"surname": "Alekseev", "given": "Pavel", "initials": "P.V."}],
+            },
+            {"year": "2026", "authors": [{"surname": "Alekseev", "given": "Pavel", "initials": "P.V."}]},
+        ]
+        self.assertEqual(report_scope_label(records, university=True), "ГАГУ, 2022–2026")
+        self.assertEqual(
+            report_scope_label(records, university=False, author_last="Alekseev"),
+            "Alekseev P.V., 2022–2026",
+        )
+        self.assertEqual(report_scope_label(records, university=True, year="2024"), "ГАГУ, 2024")
+
+    def test_top_authors_counts_papers_and_quartiles(self):
+        records = [
+            {
+                "scimago_quartile": "Q1",
+                "authors": [
+                    {"surname": "Ivanov", "given": "Ivan", "initials": "I.I."},
+                    {"surname": "Petrov", "given": "Petr", "initials": "P.P."},
+                ],
+            },
+            {
+                "scimago_quartile": "Q2",
+                "authors": [{"surname": "Ivanov", "given": "I", "initials": "I."}],
+            },
+            {
+                "scimago_quartile": "Нет",
+                "authors": [{"surname": "Petrov", "given": "Petr", "initials": "P.P."}],
+            },
+        ]
+        rows = top_authors(records, 10)
+        by_name = {row["Автор"]: row for row in rows}
+        self.assertEqual(by_name["Ivanov I.I."]["Публикаций"], 2)
+        self.assertEqual(by_name["Ivanov I.I."]["Q1"], 1)
+        self.assertEqual(by_name["Ivanov I.I."]["Q2"], 1)
+        self.assertEqual(by_name["Petrov P.P."]["Публикаций"], 2)
+        self.assertEqual(by_name["Petrov P.P."]["Без квартиля"], 1)
+        self.assertEqual(rows[0]["Автор"], "Ivanov I.I.")
 
 
 if __name__ == "__main__":

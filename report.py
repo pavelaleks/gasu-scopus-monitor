@@ -109,6 +109,115 @@ def ru_publications(count: int) -> str:
     return f"{count} {word}"
 
 
+def _author_initials(author: dict) -> str:
+    stored = (author.get("initials") or "").strip()
+    letters = [ch for ch in stored.replace(".", " ") if ch.isalpha()]
+    if letters:
+        return "".join(f"{ch.upper()}." for ch in letters)
+    given = (author.get("given") or "").replace(".", " ").replace("-", " ").strip()
+    parts = [p for p in given.split() if p]
+    return "".join(f"{p[0].upper()}." for p in parts)
+
+
+def author_display_name(author: dict) -> str:
+    surname = (author.get("surname") or "").strip()
+    initials = _author_initials(author)
+    if surname and initials:
+        return f"{surname} {initials}"
+    return surname
+
+
+def author_merge_key(author: dict) -> str | None:
+    surname = (author.get("surname") or "").strip()
+    if not surname:
+        return None
+    initials = _author_initials(author)
+    first = initials[:2].lower() if initials else ""
+    return f"{surname.lower()}|{first}"
+
+
+def report_who_label(records: list[dict], *, university: bool, author_last: str = "") -> str:
+    if university:
+        return "ГАГУ"
+    wanted = (author_last or "").strip().lower()
+    if wanted:
+        for rec in records:
+            for author in rec.get("authors") or []:
+                surname = (author.get("surname") or "").strip()
+                if surname.lower() == wanted or wanted in surname.lower():
+                    name = author_display_name(author)
+                    if name:
+                        return name
+    return (author_last or "").strip() or "Автор"
+
+
+def report_scope_label(
+    records: list[dict],
+    *,
+    university: bool,
+    author_last: str = "",
+    year: str | None = None,
+) -> str:
+    who = report_who_label(records, university=university, author_last=author_last)
+    if year:
+        return f"{who}, {year}"
+    years = sorted({int(rec["year"]) for rec in records if str(rec.get("year") or "").isdigit()})
+    if not years:
+        return who
+    period = str(years[0]) if years[0] == years[-1] else f"{years[0]}–{years[-1]}"
+    return f"{who}, {period}"
+
+
+def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for rec in records:
+        quartile = rec.get("scimago_quartile") or "Нет"
+        if quartile not in {"Q1", "Q2", "Q3", "Q4"}:
+            quartile = "Нет"
+        seen: set[str] = set()
+        for author in rec.get("authors") or []:
+            key = author_merge_key(author)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = {
+                    "names": Counter(),
+                    "n": 0,
+                    "Q1": 0,
+                    "Q2": 0,
+                    "Q3": 0,
+                    "Q4": 0,
+                    "none": 0,
+                }
+                buckets[key] = bucket
+            bucket["names"][author_display_name(author)] += 1
+            bucket["n"] += 1
+            if quartile == "Нет":
+                bucket["none"] += 1
+            else:
+                bucket[quartile] += 1
+    rows = []
+    for bucket in buckets.values():
+        name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
+        share = round((bucket["Q1"] + bucket["Q2"]) / bucket["n"] * 100, 1) if bucket["n"] else 0.0
+        rows.append(
+            {
+                "Автор": name,
+                "Публикаций": bucket["n"],
+                "Q1": bucket["Q1"],
+                "Q2": bucket["Q2"],
+                "Q3": bucket["Q3"],
+                "Q4": bucket["Q4"],
+                "Без квартиля": bucket["none"],
+                "Доля Q1–Q2": f"{share:g}%",
+            }
+        )
+    rows.sort(key=lambda row: (-row["Публикаций"], -row["Q1"], row["Автор"].lower()))
+    return rows[:limit]
+
+
 def report_sentence(report: ReportData) -> str:
     if not report.year_rows:
         return f"В выборке {report.total} записей без указанного года публикации."
@@ -214,7 +323,7 @@ def build_area_figure(
         fontsize=8,
         labelspacing=0.45,
     )
-    ax.set_title(title, fontsize=11, pad=8)
+    ax.set_title(title, fontsize=10, pad=8)
     fig.tight_layout(pad=0.35)
     return fig
 
@@ -236,7 +345,7 @@ QUARTILE_COLORS = {
 }
 
 
-def report_quartile_png(rows: list[dict]) -> bytes:
+def report_quartile_png(rows: list[dict], title: str = "Квартили журналов SCImago") -> bytes:
     slices = [(row["Квартиль"], int(row["Публикаций"])) for row in rows if int(row["Публикаций"])]
     colors = [QUARTILE_COLORS.get(name, "#adb5bd") for name, _ in slices]
-    return report_area_png(slices, title="Квартили журналов SCImago", colors=colors)
+    return report_area_png(slices, title=title, colors=colors)

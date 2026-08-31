@@ -12,7 +12,16 @@ from docx import Document
 
 from auth import cookie_manager, logout, require_login
 from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
-from report import ReportData, build_report, report_area_png, report_chart_png, report_quartile_png, report_sentence
+from report import (
+    ReportData,
+    build_report,
+    report_area_png,
+    report_chart_png,
+    report_quartile_png,
+    report_scope_label,
+    report_sentence,
+    top_authors,
+)
 from scimago import (
     attach_scimago,
     format_quartile_cell,
@@ -37,7 +46,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -362,7 +371,12 @@ def build_docx(records: list[dict], fmt: str) -> BytesIO:
     return buf
 
 
-def build_xlsx(records: list[dict], report_records: list[dict] | None = None) -> BytesIO:
+def build_xlsx(
+    records: list[dict],
+    report_records: list[dict] | None = None,
+    *,
+    university: bool = False,
+) -> BytesIO:
     df = records_to_dataframe(records)
     df["ГОСТ 7.0.5"] = [format_gost(r) for r in records]
     df["APA 7th"] = [format_apa(r) for r in records]
@@ -373,6 +387,10 @@ def build_xlsx(records: list[dict], report_records: list[dict] | None = None) ->
         df.to_excel(writer, index=False, sheet_name="Scopus")
         if report.year_rows:
             pd.DataFrame(report.year_rows).to_excel(writer, index=False, sheet_name="Динамика")
+        if university:
+            authors = top_authors(source, 20)
+            if authors:
+                pd.DataFrame(authors).to_excel(writer, index=False, sheet_name="Авторы")
         if report.top_journals:
             pd.DataFrame(report.top_journals, columns=["Источник", "Публикаций"]).to_excel(
                 writer, index=False, sheet_name="Источники"
@@ -387,7 +405,15 @@ def build_xlsx(records: list[dict], report_records: list[dict] | None = None) ->
     return buf
 
 
-def render_report_block(report: ReportData, records: list[dict], *, author_mode: bool, has_orcid: bool) -> None:
+def render_report_block(
+    report: ReportData,
+    records: list[dict],
+    *,
+    author_mode: bool,
+    has_orcid: bool,
+    university: bool,
+    author_last: str = "",
+) -> None:
     st.subheader("Динамика для отчёта")
     if author_mode and not has_orcid:
         st.warning("Поиск по фамилии без ORCID может включать однофамильцев. Для персонального отчёта лучше указать ORCID.")
@@ -405,43 +431,85 @@ def render_report_block(report: ReportData, records: list[dict], *, author_mode:
         st.caption("По году публикации. Годы без работ показаны как 0. Год к году — в таблице ниже.")
     if report.year_rows:
         st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
+
     years = sorted({str(rec.get("year")) for rec in records if str(rec.get("year") or "").isdigit()})
     if years:
-        area_choice = st.selectbox("Области знаний за", ["Весь период", *years], key="area_chart_year")
+        area_choice = st.selectbox("Срез для диаграмм", ["Весь период", *years], key="area_chart_year")
         year_filter = None if area_choice == "Весь период" else area_choice
+        scope = report_scope_label(
+            records,
+            university=university,
+            author_last=author_last,
+            year=year_filter,
+        )
         area_rows = area_share_rows(records, year_filter)
-        if area_rows:
-            title = "Области знаний Scopus" if year_filter is None else f"Области знаний Scopus, {year_filter}"
-            png = report_area_png(grouped_area_counts(area_rows), title=title)
-            st.image(png, width=560)
-            st.download_button(
-                "Скачать диаграмму областей (PNG)",
-                data=png,
-                file_name="scopus_oblasti.png",
-                mime="image/png",
-                key="download_area_png",
+        q_rows = quartile_share_rows(records, year_filter)
+        left, right = st.columns(2)
+        with left:
+            if area_rows:
+                png = report_area_png(
+                    grouped_area_counts(area_rows),
+                    title=f"{scope} · области знаний",
+                )
+                st.image(png, use_container_width=True)
+                st.download_button(
+                    "Скачать области (PNG)",
+                    data=png,
+                    file_name="scopus_oblasti.png",
+                    mime="image/png",
+                    key="download_area_png",
+                )
+                st.caption(
+                    f"{scope}. Основная область журнала в Scopus (ASJC): одна публикация — один сектор. "
+                    "Конференции и книги без ISSN — «Не указано»."
+                )
+        with right:
+            if q_rows:
+                png = report_quartile_png(q_rows, title=f"{scope} · квартили SCImago")
+                st.image(png, use_container_width=True)
+                st.download_button(
+                    "Скачать квартили (PNG)",
+                    data=png,
+                    file_name="scopus_kvartili.png",
+                    mime="image/png",
+                    key="download_quartile_png",
+                )
+                st.caption(
+                    f"{scope}. Лучший квартиль журнала SCImago. Если года статьи ещё нет в рейтинге, "
+                    "берётся последний закрытый год."
+                )
+        detail_left, detail_right = st.columns(2)
+        with detail_left:
+            if area_rows:
+                st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
+        with detail_right:
+            if q_rows:
+                st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
+
+    if university:
+        st.markdown("**Наиболее активные авторы**")
+        top_n = st.radio(
+            "Размер списка",
+            [5, 10, 20],
+            index=1,
+            horizontal=True,
+            format_func=lambda n: f"Топ {n}",
+            key="top_authors_n",
+            label_visibility="collapsed",
+        )
+        author_rows = top_authors(records, int(top_n))
+        if author_rows:
+            st.dataframe(
+                pd.DataFrame(author_rows),
+                hide_index=True,
+                use_container_width=True,
             )
             st.caption(
-                "По основной области журнала в классификации Scopus. В таблице публикаций указаны все области издания. "
-                "Конференции и книги без ISSN — «Не указано»."
+                f"{report_scope_label(records, university=True)}. "
+                "Соавторство считается: статья входит в показатель каждого автора. "
+                "Q1–Q4 — квартиль журнала этой статьи."
             )
-            st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
-    q_rows = quartile_share_rows(records)
-    if q_rows:
-        png = report_quartile_png(q_rows)
-        st.image(png, width=560)
-        st.download_button(
-            "Скачать диаграмму квартилей (PNG)",
-            data=png,
-            file_name="scopus_kvartili.png",
-            mime="image/png",
-            key="download_quartile_png",
-        )
-        st.caption(
-            "Лучший квартиль журнала в SCImago. Если год статьи ещё нет в рейтинге, берётся последний закрытый год "
-            "и он указывается в скобках, например Q2 (2025). Конференции и издания без ISSN — «Нет»."
-        )
-        st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
+
     if report.top_journals:
         st.caption("Топ источников")
         st.dataframe(
@@ -474,6 +542,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "only_gasu",
         "issn_subject_cache",
         "area_chart_year",
+        "top_authors_n",
     ):
         st.session_state.pop(key, None)
 
@@ -515,17 +584,18 @@ with st.sidebar:
         if max_year:
             st.caption(f"В файле рейтинги журналов по {max_year} год включительно.")
 
-st.markdown("Нажмите кнопку для быстрого мониторинга или выберите режим поиска.")
 st.caption(
     "Мониторинг ГАГУ включает статьи, где университет указан хотя бы как одна из "
     "аффилиаций (в том числе вместе с другими организациями)."
 )
 
-quick_check = st.button(
-    "Проверить новые статьи ГАГУ за текущий год",
-    type="primary",
-    use_container_width=True,
-)
+quick_col, _ = st.columns([2, 3])
+with quick_col:
+    quick_check = st.button(
+        "Проверить статьи ГАГУ за текущий год",
+        type="primary",
+        use_container_width=True,
+    )
 
 mode = st.radio("Режим поиска", ["Мониторинг ГАГУ", "Поиск по автору"], horizontal=True)
 
@@ -681,6 +751,8 @@ if "records" in st.session_state and st.session_state["records"]:
                 report_source,
                 author_mode=(st.session_state.get("search_mode") == "Поиск по автору"),
                 has_orcid=bool(st.session_state.get("author_orcid")),
+                university=(st.session_state.get("search_mode") != "Поиск по автору"),
+                author_last=st.session_state.get("author_last") or "",
             )
         else:
             st.info("За этот период публикаций не найдено.")
@@ -704,7 +776,11 @@ if "records" in st.session_state and st.session_state["records"]:
     st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
 
     docx_buffer = build_docx(records_for_list, format_choice)
-    xlsx_buffer = build_xlsx(records_for_list, st.session_state.get("dynamics_records") or records)
+    xlsx_buffer = build_xlsx(
+        records_for_list,
+        st.session_state.get("dynamics_records") or records,
+        university=(st.session_state.get("search_mode") != "Поиск по автору"),
+    )
 
     col1, col2 = st.columns(2)
     with col1:

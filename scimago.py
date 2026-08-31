@@ -263,16 +263,19 @@ def format_quartile_cell(record: dict) -> str:
     return f"{quartile} ({year})"
 
 
-def quartile_share_rows(records: list[dict]) -> list[dict]:
+def quartile_share_rows(records: list[dict], year: str | None = None) -> list[dict]:
     from collections import Counter
 
+    subset = records
+    if year:
+        subset = [rec for rec in records if str(rec.get("year") or "") == str(year)]
     counts = Counter()
-    for rec in records:
+    for rec in subset:
         value = rec.get("scimago_quartile") or UNKNOWN_QUARTILE
         if value not in QUARTILES:
             value = UNKNOWN_QUARTILE
         counts[value] += 1
-    total = len(records)
+    total = len(subset)
     rows = []
     for label in QUARTILES:
         current = counts.get(label, 0)

@@ -83,7 +83,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -1033,14 +1033,12 @@ if mode == MODE_UNIVERSITY:
         "Полный список работ одного человека — режим «Поиск по автору». "
         "Потенциальные грантодержатели — отдельный режим «РНФ»."
     )
-    quick_check = st.button(
-        "Статьи ГАГУ за текущий год",
-        type="primary",
-        use_container_width=True,
-        key="quick_year",
-    )
     time_filter, start_year, end_year = period_filter_widgets()
-    search_clicked = st.button("Найти публикации")
+    year_col, find_col, _ = st.columns([2, 2, 3])
+    with year_col:
+        quick_check = st.button("Статьи ГАГУ за текущий год", key="quick_year")
+    with find_col:
+        search_clicked = st.button("Найти публикации", key="search_university")
     if quick_check:
         time_filter = "Текущий год"
         search_clicked = True
@@ -1051,20 +1049,11 @@ elif mode == MODE_RSF:
         "В список попадают люди, у которых в этом окне есть хотя бы одна статья с ГАГУ. "
         "Штат или совместительство Scopus не показывает. Это оценка для мониторинга, не экспертиза заявки."
     )
-    rsf_left, rsf_right = st.columns(2)
-    with rsf_left:
-        quick_rsf8 = st.button(
-            f"РНФ {window.contest_year}, от 8 статей",
-            type="primary",
-            use_container_width=True,
-            key="quick_rsf8",
-        )
-    with rsf_right:
-        quick_rsf5 = st.button(
-            f"РНФ {window.contest_year}, от 5 статей",
-            use_container_width=True,
-            key="quick_rsf5",
-        )
+    eight_col, five_col, _ = st.columns([2, 2, 3])
+    with eight_col:
+        quick_rsf8 = st.button(f"РНФ {window.contest_year}, от 8 статей", key="quick_rsf8")
+    with five_col:
+        quick_rsf5 = st.button(f"РНФ {window.contest_year}, от 5 статей", key="quick_rsf5")
     if quick_rsf8 or quick_rsf5:
         time_filter = "РНФ"
         grant_min = 8 if quick_rsf8 else 5
@@ -1080,7 +1069,7 @@ else:
     author_scopus_id = st.text_input("Scopus Author ID (если есть)", placeholder="58102647800")
     only_gasu = st.checkbox("Только аффилиация ГАГУ", value=False)
     time_filter, start_year, end_year = period_filter_widgets()
-    search_clicked = st.button("Найти публикации")
+    search_clicked = st.button("Найти публикации", key="search_author")
 
 date_filter = None
 if time_filter == "Текущий год":

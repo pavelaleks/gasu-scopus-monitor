@@ -251,14 +251,36 @@ def _affiliation_dict_is_gasu(item: dict) -> bool:
 def scopus_authid(author: dict) -> str:
     if not isinstance(author, dict):
         return ""
-    for key in ("authid", "auid", "@auid"):
-        raw = author.get(key)
+
+    def from_value(raw: object) -> str:
         if isinstance(raw, dict):
-            raw = raw.get("$") or raw.get("@id") or raw.get("#text")
+            for nested in ("$", "@id", "@auid", "#text"):
+                found = from_value(raw.get(nested))
+                if found:
+                    return found
+            return ""
         text = str(raw or "").strip()
+        lower = text.lower()
+        marker = "author_id/"
+        if marker in lower:
+            rest = text[lower.index(marker) + len(marker) :]
+            digits = []
+            for ch in rest:
+                if ch.isdigit():
+                    digits.append(ch)
+                elif digits:
+                    break
+            if len(digits) >= 6:
+                return "".join(digits)
         digits = "".join(ch for ch in text if ch.isdigit())
         if len(digits) >= 6:
             return digits
+        return ""
+
+    for key in ("authid", "auid", "@auid", "author-url", "@href"):
+        found = from_value(author.get(key))
+        if found:
+            return found
     return ""
 
 

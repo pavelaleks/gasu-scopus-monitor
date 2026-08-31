@@ -1,7 +1,7 @@
 import unittest
 
 from report import (
-    apply_author_corpus,
+    apply_author_total,
     build_report,
     has_external_affiliation,
     report_area_png,
@@ -124,7 +124,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(by_name["Petrov P.P."]["Без квартиля"], 1)
         self.assertEqual(rows[0]["Автор"], "Ivanov I.I.")
 
-    def test_rsf_drops_pure_external_coauthor(self):
+    def test_rsf_keeps_coauthors_on_gasu_papers(self):
         records = [
             {
                 "authors": [
@@ -134,16 +134,14 @@ class ReportTests(unittest.TestCase):
             }
             for _ in range(8)
         ]
-        rows = rsf_eligibility_rows(rsf_candidates(records), 8)
-        self.assertEqual([row["Автор"] for row in rows], ["Ivanov I."])
-        self.assertEqual(rows[0]["Всего Scopus"], 8)
-        self.assertEqual(rows[0]["С ГАГУ"], 8)
+        names = [row["Автор"] for row in rsf_eligibility_rows(rsf_candidates(records), 8)]
+        self.assertEqual(names, ["Ivanov I.", "Petrov P."])
 
     def test_rsf_excludes_chanchaeva_and_keeps_alekseev(self):
         records = [
             {
                 "authors": [
-                    {"surname": "Alekseev", "given": "Pavel", "initials": "P.V.", "from_gasu": None},
+                    {"surname": "Alekseev", "given": "Pavel", "initials": "P.V.", "from_gasu": False},
                     {"surname": "Chanchaeva", "given": "E", "initials": "E.A.", "from_gasu": True},
                 ]
             }
@@ -153,11 +151,6 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(names, ["Alekseev P.V."])
 
     def test_rsf_threshold_uses_all_scopus_papers(self):
-        from datetime import date
-
-        from rsf import rsf_window
-
-        window = rsf_window(date(2026, 8, 31))
         gasu_paper = {
             "year": "2022",
             "cover_date": "2022-03-01",
@@ -167,7 +160,7 @@ class ReportTests(unittest.TestCase):
                     "surname": "Alekseev",
                     "given": "Pavel",
                     "initials": "P.V.",
-                    "from_gasu": None,
+                    "from_gasu": False,
                     "authid": "57200000000",
                 }
             ],
@@ -175,16 +168,7 @@ class ReportTests(unittest.TestCase):
         candidates = rsf_candidates([gasu_paper, dict(gasu_paper), dict(gasu_paper)])
         self.assertEqual(candidates[0]["С ГАГУ"], 3)
         self.assertEqual(candidates[0]["Всего Scopus"], 3)
-        corpus = [dict(gasu_paper) for _ in range(3)] + [
-            {
-                "year": "2023",
-                "cover_date": "2023-05-01",
-                "affiliation": "Tomsk State University",
-                "scimago_quartile": "Q2",
-            }
-            for _ in range(5)
-        ]
-        apply_author_corpus(candidates[0], corpus, window)
+        apply_author_total(candidates[0], 8)
         self.assertEqual(candidates[0]["Всего Scopus"], 8)
         self.assertEqual(candidates[0]["С ГАГУ"], 3)
         self.assertEqual(candidates[0]["Учёт"], "все статьи автора")

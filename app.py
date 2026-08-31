@@ -33,7 +33,7 @@ from report import (
     rsf_eligibility_rows,
     ru_publications,
     top_authors,
-    apply_author_corpus,
+    apply_author_total,
 )
 from rsf import record_in_rsf_window, rsf_window
 from scimago import (
@@ -60,7 +60,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -137,6 +137,17 @@ def parse_authors(entry: dict) -> list[dict]:
             surname = (item.get("surname") or "").strip()
             given = (item.get("given-name") or "").strip()
             initials = (item.get("initials") or "").strip()
+            if not surname:
+                authname = (item.get("authname") or item.get("ce:indexed-name") or "").strip()
+                if "," in authname:
+                    surname, rest = [p.strip() for p in authname.split(",", 1)]
+                    if not given:
+                        given = rest
+                elif authname:
+                    parts = authname.split()
+                    surname = parts[0]
+                    if not given and len(parts) > 1:
+                        given = " ".join(parts[1:])
             if not given and initials:
                 given = normalize_initials(initials)
             authors.append(
@@ -286,6 +297,16 @@ def _scopus_get(headers: dict, params: dict) -> requests.Response:
     return response
 
 
+def fetch_scopus_total(query: str, api_key: str) -> int:
+    """Сколько документов находит запрос — без выгрузки и без фильтра ГАГУ."""
+    headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
+    response = _scopus_get(headers, {"query": query, "count": 1, "start": 0})
+    if response.status_code != 200:
+        raise RuntimeError(response.text)
+    payload = response.json()
+    return int((payload.get("search-results") or {}).get("opensearch:totalResults") or 0)
+
+
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     records = []
@@ -346,25 +367,21 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
     return records
 
 
-def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> list[dict]:
+def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple[list[dict], int]:
     expanded = []
+    failed = 0
     for cand in candidates:
         row = dict(cand)
         authid = (cand.get("authid") or "").strip()
         if authid:
             query = author_id_query(authid, window.from_year, window.to_year)
             try:
-                papers = fetch_scopus_data(query, api_key, None)
-                try:
-                    attach_scimago(papers)
-                except Exception:
-                    for rec in papers:
-                        rec.setdefault("scimago_quartile", "Нет")
-                apply_author_corpus(row, papers, window)
+                total = fetch_scopus_total(query, api_key)
+                apply_author_total(row, total)
             except Exception:
-                pass
+                failed += 1
         expanded.append(row)
-    return expanded
+    return expanded, failed
 
 
 def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
@@ -604,6 +621,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_contest_year",
         "grant_from_year",
         "grant_rows",
+        "grant_failed",
     ):
         st.session_state.pop(key, None)
 
@@ -792,15 +810,17 @@ if search_clicked:
         st.session_state["grant_from_year"] = window.from_year
         candidates = rsf_candidates(records)
         with st.spinner(
-            "Считаем все статьи Scopus каждого автора по Author ID, не только публикации с ГАГУ..."
+            "Уточняем число всех статей Scopus по Author ID, без фильтра по аффилиации..."
         ):
-            expanded = expand_rsf_candidates(candidates, window, api_key)
+            expanded, failed = expand_rsf_candidates(candidates, window, api_key)
         st.session_state["grant_rows"] = rsf_eligibility_rows(expanded, grant_min)
+        st.session_state["grant_failed"] = failed
     else:
         st.session_state.pop("grant_min", None)
         st.session_state.pop("grant_contest_year", None)
         st.session_state.pop("grant_from_year", None)
         st.session_state.pop("grant_rows", None)
+        st.session_state.pop("grant_failed", None)
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
@@ -824,16 +844,15 @@ if "records" in st.session_state and st.session_state["records"]:
             st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
         else:
             st.info("Никто не набрал порог по всем статьям Scopus в этом окне.")
+        failed = int(st.session_state.get("grant_failed") or 0)
         st.caption(
-            "Кандидат — человек, у которого в окне есть хотя бы одна статья с ГАГУ: "
-            "так программа узнаёт связь с вузом, штатное расписание ей недоступно. "
-            "«Всего Scopus» — все его статьи за период, в том числе без ГАГУ. "
-            "«С ГАГУ» — сколько из них с аффилиацией университета. "
-            "Совместитель с парой статей ГАГУ и большим личным списком тоже попадёт: "
-            "это видно по двум столбцам, решение за проректором. "
-            "Чистый внешний соавтор (на статьях ГАГУ у него всегда чужая организация) не включается. "
-            "Если нет Scopus Author ID, считаются только статьи с ГАГУ. "
+            "В список попадает каждый автор статей ГАГУ в этом окне — без фильтра по его личной "
+            "аффилиации в карточке Scopus. Порог считается по всем его статьям Scopus "
+            "(запрос AU-ID), столбец «С ГАГУ» показывает, сколько из них с университетом. "
+            "Совместитель и внешний соавтор тоже могут оказаться в таблице: смотрите оба числа. "
+            "Если у человека нет Author ID, остаётся только счётчик статей с ГАГУ. "
             "Это оценка для мониторинга, не экспертиза заявки."
+            + (f" Не удалось уточнить полный список у {failed} авторов." if failed else "")
         )
 
     st.subheader("Результаты")

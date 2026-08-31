@@ -6,8 +6,8 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 
-from gasu import is_gasu_name, record_has_gasu
-from rsf import record_in_rsf_window, rsf_name_excluded
+from gasu import is_gasu_name
+from rsf import rsf_name_excluded
 
 
 @dataclass(frozen=True)
@@ -270,8 +270,37 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
     }
 
 
+def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
+    """Склеить одного человека, если часть записей без Author ID."""
+    by_surname: dict[str, list[str]] = {}
+    for key, bucket in buckets.items():
+        if not bucket["names"]:
+            continue
+        name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
+        surname = name.split()[0].lower()
+        by_surname.setdefault(surname, []).append(key)
+    for keys in by_surname.values():
+        id_keys = [key for key in keys if key.startswith("id|")]
+        other = [key for key in keys if not key.startswith("id|")]
+        if len(id_keys) != 1 or not other:
+            continue
+        dest = buckets[id_keys[0]]
+        for src_key in other:
+            src = buckets.pop(src_key)
+            dest["names"].update(src["names"])
+            dest["gasu_n"] += src["gasu_n"]
+            dest["Q1"] += src["Q1"]
+            dest["Q2"] += src["Q2"]
+            dest["Q3"] += src["Q3"]
+            dest["Q4"] += src["Q4"]
+            dest["none"] += src["none"]
+            dest["flags"].update(src["flags"])
+            if src.get("authid") and not dest.get("authid"):
+                dest["authid"] = src["authid"]
+
+
 def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
-    """Кто связан с ГАГУ: есть в статьях вуза, не чистый внешний соавтор, не из исключений."""
+    """Кто связан с ГАГУ: есть хотя бы в одной статье вуза. Аффилиацию автора не фильтруем."""
     buckets: dict[str, dict] = {}
     for rec in gasu_records:
         seen: set[str] = set()
@@ -294,34 +323,19 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
             bucket["flags"].add(author.get("from_gasu"))
             bucket["gasu_n"] += 1
             _add_quartile(bucket, rec)
+    _coalesce_author_buckets(buckets)
     rows = []
     for bucket in buckets.values():
-        flags = bucket["flags"]
-        if flags and flags <= {False}:
-            continue
         bucket["total"] = bucket["gasu_n"]
         rows.append(_candidate_row(bucket, account="только статьи с ГАГУ"))
     rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
     return rows
 
 
-def apply_author_corpus(candidate: dict, records: list[dict], window) -> dict:
-    """Подставить все статьи автора в окне РНФ, не только с ГАГУ."""
-    subset = [rec for rec in records if record_in_rsf_window(rec, window)]
-    gasu_n = sum(1 for rec in subset if record_has_gasu(rec))
+def apply_author_total(candidate: dict, total: int) -> dict:
+    """Число всех статей Scopus в окне (ответ API), без фильтра по аффилиации."""
     known_gasu = int(candidate.get("С ГАГУ") or 0)
-    total = max(len(subset), known_gasu)
-    gasu_n = max(gasu_n, known_gasu)
-    q = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0, "none": 0}
-    for rec in subset:
-        _add_quartile(q, rec)
-    candidate["Всего Scopus"] = total
-    candidate["С ГАГУ"] = gasu_n
-    candidate["Q1"] = q["Q1"]
-    candidate["Q2"] = q["Q2"]
-    candidate["Q3"] = q["Q3"]
-    candidate["Q4"] = q["Q4"]
-    candidate["Без квартиля"] = q["none"]
+    candidate["Всего Scopus"] = max(int(total), known_gasu)
     candidate["Учёт"] = "все статьи автора"
     return candidate
 

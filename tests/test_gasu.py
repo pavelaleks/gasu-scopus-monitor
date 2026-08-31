@@ -22,6 +22,7 @@ from gasu import (
     parse_author_search_profile,
     parse_authors,
     pick_scopus_authid,
+    profile_display_name,
     record_has_gasu,
     scopus_authid,
 )
@@ -326,6 +327,7 @@ class MultiAffiliationTests(unittest.TestCase):
                 "affiliation-current": {
                     "affiliation-name": "Gorno-Altaisk State University",
                     "affiliation-city": "Gorno-Altaysk",
+                    "affiliation-country": "Russian Federation",
                 },
             }
         )
@@ -334,26 +336,43 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertEqual(search["documents"], 13)
         self.assertEqual(search["cited_by"], 10)
         self.assertIn("Gorno-Altaisk", search["profile_affil"])
+        self.assertIn("Russian Federation", search["profile_affil"])
         retrieval = parse_author_retrieval(
             {
                 "author-retrieval-response": [
                     {
-                        "h-index": "2",
+                        "h-index": "1",
                         "coauthor-count": "20",
                         "coredata": {
-                            "dc:identifier": "AUTHOR_ID:58102647800",
-                            "orcid": "0000-0003-3680-1785",
-                            "document-count": "13",
-                            "cited-by-count": "10",
-                            "citation-count": "10",
+                            "dc:identifier": "AUTHOR_ID:57222578674",
+                            "orcid": "0000-0002-8043-4014",
+                            "document-count": "8",
+                            "cited-by-count": "3",
+                            "citation-count": "3",
+                        },
+                        "author-profile": {
+                            "preferred-name": {
+                                "surname": "Safonova",
+                                "given-name": "Varvara Yu",
+                                "initials": "V.Y.",
+                            },
+                            "affiliation-current": {
+                                "affiliation-name": "Gorno-Altaisk State University",
+                                "affiliation-city": "Gorno-Altaysk",
+                                "affiliation-country": "Russian Federation",
+                            },
                         },
                     }
                 ]
             }
         )
-        self.assertEqual(retrieval["h_index"], 2)
-        self.assertEqual(retrieval["documents"], 13)
-        self.assertEqual(retrieval["orcid"], "0000-0003-3680-1785")
+        self.assertEqual(retrieval["h_index"], 1)
+        self.assertEqual(retrieval["documents"], 8)
+        self.assertEqual(retrieval["cited_by"], 3)
+        self.assertEqual(retrieval["orcid"], "0000-0002-8043-4014")
+        self.assertEqual(profile_display_name(retrieval), "Safonova, Varvara Yu")
+        self.assertIn("Gorno-Altaisk", retrieval["profile_affil"])
+        self.assertIn("Russian Federation", retrieval["profile_affil"])
 
 
 if __name__ == "__main__":

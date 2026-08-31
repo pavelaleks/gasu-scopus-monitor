@@ -31,6 +31,7 @@ from gasu import (
     parse_author_search_profile,
     parse_authors,
     pick_scopus_authid,
+    profile_display_name,
     query_targets_gasu,
     quoted,
 )
@@ -81,7 +82,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.8.10"
 APP_UPDATED_FALLBACK = "29.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_AUTHOR = "Поиск по автору"
@@ -448,31 +449,28 @@ def fetch_author_metrics(authid: str, api_key: str) -> dict:
     if not ident:
         return {}
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
-    params = {"view": "METRICS"}
-    try:
-        response = requests.get(
-            f"{AUTHOR_RETRIEVAL_URL}/{ident}",
-            headers=headers,
-            params=params,
-            timeout=45,
-        )
-    except requests.RequestException:
-        return {}
-    if response.status_code in {400, 401, 403}:
+    merged: dict = {}
+    for view in ("ENHANCED", "METRICS", None):
+        params = {"view": view} if view else {}
         try:
             response = requests.get(
                 f"{AUTHOR_RETRIEVAL_URL}/{ident}",
                 headers=headers,
+                params=params,
                 timeout=45,
             )
         except requests.RequestException:
-            return {}
-    if response.status_code != 200:
-        return {}
-    try:
-        return parse_author_retrieval(response.json())
-    except Exception:
-        return {}
+            continue
+        if response.status_code != 200:
+            continue
+        try:
+            parsed = parse_author_retrieval(response.json())
+        except Exception:
+            continue
+        apply_author_profile(merged, parsed)
+        if merged.get("h_index") is not None and (merged.get("surname") or merged.get("documents") is not None):
+            break
+    return merged
 
 
 def stamp_author_profiles(records: list[dict], api_key: str) -> int:
@@ -705,6 +703,7 @@ def build_xlsx(
     *,
     university: bool = False,
     grant_rows: list[dict] | None = None,
+    profile: dict | None = None,
 ) -> BytesIO:
     df = records_to_dataframe(records)
     df["ГОСТ 7.0.5"] = [format_gost(r) for r in records]
@@ -714,6 +713,27 @@ def build_xlsx(
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Scopus")
+        if profile:
+            pd.DataFrame(
+                [
+                    {
+                        "Автор": profile_display_name(profile),
+                        "Author ID": profile.get("authid") or "",
+                        "ORCID": profile.get("orcid") or "",
+                        "Аффилиация": profile.get("profile_affil") or "",
+                        "h-индекс": profile.get("h_index") if profile.get("h_index") is not None else "",
+                        "Документы": profile.get("documents") if profile.get("documents") is not None else "",
+                        "Цитирования": (
+                            profile.get("citations")
+                            if profile.get("citations") is not None
+                            else profile.get("cited_by")
+                            if profile.get("cited_by") is not None
+                            else ""
+                        ),
+                        "Цитирующих документов": profile.get("cited_by") if profile.get("cited_by") is not None else "",
+                    }
+                ]
+            ).to_excel(writer, index=False, sheet_name="Профиль")
         if report.year_rows:
             pd.DataFrame(report.year_rows).to_excel(writer, index=False, sheet_name="Динамика")
         if university:
@@ -734,6 +754,42 @@ def build_xlsx(
             pd.DataFrame(q_rows).to_excel(writer, index=False, sheet_name="Квартили")
     buf.seek(0)
     return buf
+
+
+def _metric_text(value) -> str:
+    return "—" if value is None else str(value)
+
+
+def render_scopus_profile_card(profile: dict, *, fallback_name: str = "") -> None:
+    """Карточка как на странице автора Scopus: ID, ORCID, цитирования, документы, h-индекс."""
+    name = profile_display_name(profile, fallback_name)
+    authid = (profile.get("authid") or "").strip()
+    orcid = (profile.get("orcid") or "").strip()
+    affil = (profile.get("profile_affil") or "").strip()
+    st.subheader(name or "Профиль Scopus")
+    if affil:
+        st.write(affil)
+    links = []
+    if authid:
+        links.append(f"Scopus ID: [{authid}](https://www.scopus.com/authid/detail.uri?authorId={authid})")
+    if orcid:
+        links.append(f"ORCID: [{orcid}](https://orcid.org/{orcid})")
+    if links:
+        st.markdown(" · ".join(links))
+    citations = profile.get("citations")
+    cited_by = profile.get("cited_by")
+    if citations is None:
+        citations = cited_by
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Цитирования", _metric_text(citations))
+    if cited_by is not None:
+        c1.caption(f"в {cited_by} документах")
+    c2.metric("Документы", _metric_text(profile.get("documents")))
+    c3.metric("h-индекс", _metric_text(profile.get("h_index")))
+    st.caption(
+        "Показатели профиля Scopus за всю карьеру — как на странице автора. "
+        "Ниже — только работы за выбранный период поиска."
+    )
 
 
 def render_report_block(
@@ -982,7 +1038,9 @@ if mode == MODE_UNIVERSITY:
     )
 else:
     st.caption(
-        "Публикации одного человека. РНФ и список грантодержателей здесь не строятся. "
+        "Публикации одного человека. Сверху — карточка профиля Scopus "
+        "(ID, ORCID, цитирования, документы, h-индекс), ниже — работы за выбранный период. "
+        "РНФ и список грантодержателей здесь не строятся. "
         "Надёжнее ORCID или Scopus Author ID; фамилия без них может дать однофамильцев."
     )
     author_last = st.text_input("Фамилия")
@@ -1150,7 +1208,7 @@ if search_clicked:
     st.session_state["author_orcid"] = author_orcid
     st.session_state["only_gasu"] = only_gasu
     st.session_state["author_identity"] = identity
-    st.session_state["show_report"] = False
+    st.session_state["show_report"] = mode == MODE_AUTHOR
     st.session_state.pop("dynamics_records", None)
     if grant_min:
         st.session_state["grant_min"] = grant_min
@@ -1225,16 +1283,11 @@ if "records" in st.session_state and st.session_state["records"]:
         )
 
     profile = st.session_state.get("target_profile") or {}
-    if saved_mode == MODE_AUTHOR and (profile.get("authid") or profile.get("orcid")):
-        st.subheader("Профиль автора")
-        p1, p2, p3, p4, p5 = st.columns(5)
-        p1.metric("Author ID", profile.get("authid") or "—")
-        p2.metric("h-индекс", "—" if profile.get("h_index") is None else str(profile.get("h_index")))
-        p3.metric("Документов", "—" if profile.get("documents") is None else str(profile.get("documents")))
-        p4.metric("Цитирований", "—" if profile.get("cited_by") is None else str(profile.get("cited_by")))
-        p5.metric("ORCID", profile.get("orcid") or "—")
-        if profile.get("profile_affil"):
-            st.caption(profile["profile_affil"])
+    if saved_mode == MODE_AUTHOR and (profile.get("authid") or profile.get("orcid") or profile.get("h_index") is not None):
+        render_scopus_profile_card(
+            profile,
+            fallback_name=st.session_state.get("author_last") or "",
+        )
 
     st.subheader("Результаты")
     slice_report = build_report(records)
@@ -1303,7 +1356,7 @@ if "records" in st.session_state and st.session_state["records"]:
 
     if st.session_state.get("show_report"):
         report_source = st.session_state.get("dynamics_records")
-        if report_source is None and can_chart_from_slice:
+        if report_source is None:
             report_source = records
         if report_source:
             render_report_block(
@@ -1343,6 +1396,7 @@ if "records" in st.session_state and st.session_state["records"]:
         st.session_state.get("dynamics_records") or records,
         university=(saved_mode == MODE_UNIVERSITY),
         grant_rows=grant_rows if grant_min_saved else None,
+        profile=profile if saved_mode == MODE_AUTHOR else None,
     )
 
     col1, col2 = st.columns(2)

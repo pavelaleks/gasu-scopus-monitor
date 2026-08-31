@@ -382,6 +382,19 @@ def _field_int(value: object) -> int | None:
     return None
 
 
+def _compose_current_affiliation(*parts: object) -> str:
+    seen: list[str] = []
+    for part in parts:
+        text = _field_text(part)
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(lowered in existing.lower() or existing.lower() in lowered for existing in seen):
+            continue
+        seen.append(text)
+    return ", ".join(seen)
+
+
 def parse_author_search_profile(entry: dict) -> dict:
     """Поля Author Search: ID, ORCID, документы, цитирования, текущая аффилиация."""
     if not isinstance(entry, dict):
@@ -394,13 +407,10 @@ def parse_author_search_profile(entry: dict) -> dict:
         aff = aff[0] if aff else {}
     if not isinstance(aff, dict):
         aff = {}
-    affil = " ".join(
-        part
-        for part in (
-            _field_text(aff.get("affiliation-name") or aff.get("affilname")),
-            _field_text(aff.get("affiliation-city")),
-        )
-        if part
+    affil = _compose_current_affiliation(
+        aff.get("affiliation-name") or aff.get("affilname"),
+        aff.get("affiliation-city"),
+        aff.get("affiliation-country"),
     )
     return {
         "authid": author_search_id(entry),
@@ -435,12 +445,16 @@ def parse_author_retrieval(payload: dict) -> dict:
     if not isinstance(aff, dict):
         aff = {}
     ipdoc = aff.get("ip-doc") if isinstance(aff.get("ip-doc"), dict) else {}
-    affil = _field_text(
+    address = ipdoc.get("address") if isinstance(ipdoc.get("address"), dict) else {}
+    orcid = _field_text(core.get("orcid") or inner.get("orcid") or profile.get("orcid"))
+    pref = profile.get("preferred-name") if isinstance(profile.get("preferred-name"), dict) else {}
+    affil = _compose_current_affiliation(
         aff.get("affiliation-name")
         or aff.get("affilname")
-        or (ipdoc.get("afdispname") if isinstance(ipdoc, dict) else "")
+        or (ipdoc.get("afdispname") if isinstance(ipdoc, dict) else ""),
+        aff.get("affiliation-city") or address.get("city"),
+        aff.get("affiliation-country") or address.get("country"),
     )
-    orcid = _field_text(core.get("orcid") or inner.get("orcid") or profile.get("orcid"))
     return {
         "authid": author_search_id(core) or author_search_id(inner),
         "orcid": orcid,
@@ -454,26 +468,33 @@ def parse_author_retrieval(payload: dict) -> dict:
         "h_index": _field_int(inner.get("h-index") or core.get("h-index") or profile.get("h-index")),
         "coauthors": _field_int(inner.get("coauthor-count") or core.get("coauthor-count")),
         "profile_affil": affil,
+        "surname": _field_text(pref.get("surname") or profile.get("surname")),
+        "given": _field_text(pref.get("given-name") or profile.get("given-name")),
+        "initials": _field_text(pref.get("initials")),
     }
+
+
+def profile_display_name(profile: dict, fallback: str = "") -> str:
+    surname = (profile.get("surname") or "").strip()
+    given = (profile.get("given") or "").strip()
+    initials = (profile.get("initials") or "").strip()
+    if surname and given:
+        return f"{surname}, {given}"
+    if surname and initials:
+        return f"{surname}, {initials}"
+    return surname or fallback
 
 
 def apply_author_profile(author: dict, profile: dict) -> dict:
     if not isinstance(author, dict) or not isinstance(profile, dict):
         return author
-    for key in ("authid", "orcid", "profile_affil"):
+    for key in ("authid", "orcid", "profile_affil", "surname", "given", "initials"):
         if profile.get(key) and not author.get(key):
             author[key] = profile[key]
     for key in ("documents", "cited_by", "citations", "h_index", "coauthors"):
         if author.get(key) in (None, "") and profile.get(key) is not None:
             author[key] = profile[key]
     return author
-    if not isinstance(entry, dict):
-        return ""
-    ident = str(entry.get("dc:identifier") or "")
-    digits = "".join(ch for ch in ident if ch.isdigit())
-    if len(digits) >= 6:
-        return digits
-    return scopus_authid(entry)
 
 
 def _author_entry_initial(entry: dict) -> str:

@@ -158,9 +158,9 @@ def frame_from_rda(path: Path = RDA_PATH) -> pd.DataFrame:
     return frame
 
 
-def build_slim(rda_path: Path | None = None) -> pd.DataFrame:
+def build_slim(rda_path: Path | None = None, *, refresh: bool = False) -> pd.DataFrame:
     source = rda_path or RDA_PATH
-    if not source.exists():
+    if refresh or not source.exists():
         download_rda(dest=source)
     slim = slim_from_frame(frame_from_rda(source))
     save_slim(slim)
@@ -231,6 +231,15 @@ def quartile_share_rows(records: list[dict]) -> list[dict]:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Rebuild the SCImago ISSN lookup from sjrdata.")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Download the sjrdata dump again even if a local copy exists.",
+    )
+    args = parser.parse_args()
     print("Building SCImago ISSN lookup from sjrdata...")
-    slim = build_slim()
+    slim = build_slim(refresh=args.refresh)
     print(f"Saved {len(slim)} rows, years {int(slim['year'].min())}–{int(slim['year'].max())} -> {SLIM_PATH}")

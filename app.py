@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 from docx import Document
 
-from gasu import build_query, format_affiliations, query_targets_gasu
+from gasu import build_query, format_affiliations
 from auth import cookie_manager, logout, require_login
 
 try:
@@ -20,7 +20,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -215,7 +215,6 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
     page_size = 25
     total = None
     view = "COMPLETE"
-    ensure_gasu = query_targets_gasu(query)
     while True:
         params = {"query": query, "count": page_size, "start": start}
         if view == "COMPLETE":
@@ -252,7 +251,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                     "doi": (entry.get("prism:doi") or "").strip(),
                     "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                     "authors": parse_authors(entry),
-                    "affiliation": format_affiliations(entry, ensure_gasu=ensure_gasu),
+                    "affiliation": format_affiliations(entry),
                 }
             )
             if max_results and len(records) >= max_results:

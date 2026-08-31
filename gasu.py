@@ -15,12 +15,13 @@ AFFILIATION_NAMES = [
     "GORNO ALTAISK STATE UNIV",
     "GORNO-ALTAYSK  STATE UNIV",
     "GORNO-ALTAY STATE UNIV",
-    "GASU",
     "Gorno Alta State Univ",
     "Gorno-Altaysk State University",
     "Gorno Altay State Univ",
 ]
-AFFILIATION_NAME_SET = {" ".join(name.strip().lower().split()) for name in AFFILIATION_NAMES}
+AFFILIATION_NAME_SET = {" ".join(name.strip().lower().split()) for name in AFFILIATION_NAMES} | {
+    "gasu",
+}
 GASU_NAME_MARKERS = (
     "gorno-altaisk",
     "gorno altaisk",
@@ -41,7 +42,11 @@ def quoted(value: str) -> str:
 
 
 def gasu_affiliation_clause() -> str:
-    """Документы, где ГАГУ есть хотя бы как одна из аффилиаций."""
+    """Документы, где ГАГУ есть хотя бы как одна из аффилиаций.
+
+    Короткий акроним AFFIL("GASU") не используем: Scopus ищет его в названии,
+    вариантах и городе и подмешивает чужие организации.
+    """
     names = " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES)
     return f"(AF-ID({AFFILIATION_ID}) OR {names})"
 
@@ -180,8 +185,7 @@ def has_gasu_affiliation(entry: dict) -> bool:
 
 def format_affiliations(entry: dict, ensure_gasu: bool = False) -> str:
     names = affiliation_names(entry)
-    known_gasu = has_gasu_affiliation(entry) or ensure_gasu
-    if known_gasu and not any(is_gasu_name(name) for name in names):
+    if has_gasu_affiliation(entry) and not any(is_gasu_name(name) for name in names):
         names = [GASU_PREFERRED_NAME, *names]
     elif any(is_gasu_name(name) for name in names):
         names = sorted(names, key=lambda name: 0 if is_gasu_name(name) else 1)

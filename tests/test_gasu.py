@@ -7,15 +7,15 @@ from gasu import (
     format_affiliations,
     gasu_affiliation_clause,
     has_gasu_affiliation,
-    query_targets_gasu,
 )
 
 
 class GasuQueryTests(unittest.TestCase):
-    def test_clause_uses_affiliation_id(self):
+    def test_clause_does_not_use_short_acronym(self):
         clause = gasu_affiliation_clause()
         self.assertIn(f"AF-ID({AFFILIATION_ID})", clause)
-        self.assertIn("AFFIL(", clause)
+        self.assertNotIn('AFFIL("GASU")', clause)
+        self.assertIn("Gorno-Altaisk State University", clause)
 
     def test_monitoring_query_keeps_all_gasu_hits(self):
         query = build_query(
@@ -27,12 +27,11 @@ class GasuQueryTests(unittest.TestCase):
         )
         self.assertTrue(query.startswith("(AF-ID("))
         self.assertIn("PUBYEAR IS 2026", query)
-        self.assertTrue(query_targets_gasu(query))
+        self.assertNotIn('AFFIL("GASU")', query)
 
     def test_author_search_without_gasu_filter_does_not_restrict_affiliation(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, False)
         self.assertNotIn("AF-ID(", query)
-        self.assertFalse(query_targets_gasu(query))
 
     def test_author_search_with_gasu_uses_af_id(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)
@@ -69,12 +68,12 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertIn(GASU_PREFERRED_NAME, text)
         self.assertIn("Tomsk State University", text)
 
-    def test_query_match_keeps_paper_without_dropping_on_missing_name(self):
-        entry = {"affiliation": [{"affilname": "Siberian Federal University"}]}
+    def test_query_match_does_not_invent_gasu_affiliation(self):
+        entry = {"affiliation": [{"affilname": "Innopolis University"}]}
         self.assertFalse(has_gasu_affiliation(entry))
         text = format_affiliations(entry, ensure_gasu=True)
-        self.assertIn(GASU_PREFERRED_NAME, text)
-        self.assertIn("Siberian Federal University", text)
+        self.assertNotIn(GASU_PREFERRED_NAME, text)
+        self.assertEqual(text, "Innopolis University")
 
     def test_variant_spelling_counts_as_gasu(self):
         entry = {"affiliation": [{"affilname": "Gorno-Altaysk State University, Russian Federation"}]}

@@ -25,6 +25,7 @@ from gasu import (
     entry_belongs_to_gasu,
     first_initial,
     format_affiliations,
+    gasu_author_affil_clause,
     gasu_author_roster_query,
     needs_author_enrichment,
     normalize_orcid,
@@ -85,7 +86,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.11"
+APP_VERSION = "1.8.12"
 APP_UPDATED_FALLBACK = "29.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_AUTHOR = "Поиск по автору"
@@ -342,14 +343,14 @@ def _author_search_pages(query: str, api_key: str, *, page_size: int = 25, limit
                 params={"query": query, "count": page_size, "start": start},
                 timeout=45,
             )
-        except requests.RequestException:
-            break
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Author Search недоступен: {exc}") from exc
         if response.status_code != 200:
-            break
+            raise RuntimeError(f"Author Search {response.status_code}: {response.text[:400]}")
         try:
             payload = response.json()
-        except Exception:
-            break
+        except Exception as exc:
+            raise RuntimeError("Author Search вернул не JSON.") from exc
         search_results = payload.get("search-results") or {}
         if total is None:
             total = int(search_results.get("opensearch:totalResults") or 0)
@@ -368,9 +369,23 @@ def _author_search_pages(query: str, api_key: str, *, page_size: int = 25, limit
 
 def fetch_gasu_scopus_profiles(api_key: str) -> list[dict]:
     """Профили Author Search с текущей аффилиацией ГАГУ — не срез статей."""
+    entries: list[dict] = []
+    last_error: Exception | None = None
+    for query in (gasu_author_roster_query(), gasu_author_affil_clause()):
+        try:
+            found = _author_search_pages(query, api_key)
+        except RuntimeError as exc:
+            last_error = exc
+            continue
+        last_error = None
+        entries = found
+        if entries:
+            break
+    if last_error and not entries:
+        raise last_error
     profiles: list[dict] = []
     seen: set[str] = set()
-    for entry in _author_search_pages(gasu_author_roster_query(), api_key):
+    for entry in entries:
         if not author_search_entry_is_gasu(entry):
             continue
         profile = parse_author_search_profile(entry)
@@ -384,7 +399,7 @@ def fetch_gasu_scopus_profiles(api_key: str) -> list[dict]:
     metrics: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
-            pool.submit(fetch_author_metrics, profile["authid"], api_key): profile["authid"]
+            pool.submit(fetch_author_metrics, profile["authid"], api_key, views=("METRICS",)): profile["authid"]
             for profile in profiles
         }
         for fut in as_completed(futures):
@@ -547,13 +562,18 @@ def enrich_record_authors(records: list[dict], api_key: str) -> int:
     return updated
 
 
-def fetch_author_metrics(authid: str, api_key: str) -> dict:
+def fetch_author_metrics(
+    authid: str,
+    api_key: str,
+    *,
+    views: tuple[str | None, ...] = ("ENHANCED", "METRICS", None),
+) -> dict:
     ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
     if not ident:
         return {}
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     merged: dict = {}
-    for view in ("ENHANCED", "METRICS", None):
+    for view in views:
         params = {"view": view} if view else {}
         try:
             response = requests.get(
@@ -900,6 +920,33 @@ def render_scopus_profile_card(profile: dict, *, fallback_name: str = "") -> Non
     )
 
 
+def render_gasu_profiles_block() -> None:
+    error = st.session_state.get("gasu_profiles_error")
+    if error:
+        st.error(error)
+        return
+    if "gasu_profiles" not in st.session_state:
+        return
+    roster = st.session_state.get("gasu_profiles") or []
+    st.subheader("Авторы с аффилиацией ГАГУ в Scopus")
+    if not roster:
+        st.info(
+            "Author Search не вернул профили с текущей аффилиацией ГАГУ. "
+            "Это не список статей ниже: если Scopus не отдаёт Author Search, таблица будет пустой."
+        )
+        return
+    st.caption(
+        "Как на странице автора: h-индекс, документы и цитирования за всю карьеру. "
+        "Это не число статей в списке литературы и не окно РНФ. "
+        "Здесь есть люди, которые в выдаче статей стоят не первыми."
+    )
+    st.dataframe(
+        pd.DataFrame(gasu_profile_rows(roster)),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
 def render_report_block(
     report: ReportData,
     records: list[dict],
@@ -1057,6 +1104,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "target_profile",
         "author_identity",
         "gasu_profiles",
+        "gasu_profiles_error",
     ):
         st.session_state.pop(key, None)
 
@@ -1142,6 +1190,23 @@ if mode == MODE_UNIVERSITY:
             use_container_width=True,
             key="quick_rsf5",
         )
+    if st.button(
+        "Авторы ГАГУ в Scopus (профили, h-индекс)",
+        use_container_width=True,
+        key="load_gasu_profiles",
+    ):
+        if not api_key:
+            st.session_state["gasu_profiles_error"] = "Нужен API-ключ Scopus."
+            st.session_state["gasu_profiles"] = []
+        else:
+            with st.spinner("Загружаем профили Author Search с аффилиацией ГАГУ..."):
+                try:
+                    st.session_state["gasu_profiles"] = fetch_gasu_scopus_profiles(api_key)
+                    st.session_state["gasu_profiles_error"] = None
+                except Exception as exc:
+                    st.session_state["gasu_profiles"] = []
+                    st.session_state["gasu_profiles_error"] = str(exc)
+    render_gasu_profiles_block()
     st.caption(
         f"РНФ: ближайший конкурс — {window.contest_year} год. "
         f"Порог считается по всем статьям Scopus автора с {window.from_label}, а не только с аффилиацией ГАГУ. "
@@ -1429,26 +1494,6 @@ if "records" in st.session_state and st.session_state["records"]:
                 "в «наиболее активные авторы» и в РНФ. "
                 "Показатели вроде «8 documents / h-index 1» — весь профиль Scopus, "
                 "а не число работ ГАГУ в этом срезе. Полный список человека — «Поиск по автору»."
-            )
-        if st.button("Авторы ГАГУ в Scopus (профили, h-индекс)", key="load_gasu_profiles"):
-            if not api_key:
-                st.error("Нужен API-ключ Scopus.")
-            else:
-                with st.spinner("Загружаем профили Author Search с аффилиацией ГАГУ..."):
-                    st.session_state["gasu_profiles"] = fetch_gasu_scopus_profiles(api_key)
-                st.rerun()
-        roster = st.session_state.get("gasu_profiles") or []
-        if roster:
-            st.subheader("Авторы с аффилиацией ГАГУ в Scopus")
-            st.caption(
-                "Как на странице автора: h-индекс, документы и цитирования за всю карьеру. "
-                "Это не число статей в списке ниже и не окно РНФ. "
-                "Здесь есть люди, которые в выдаче статей стоят не первыми."
-            )
-            st.dataframe(
-                pd.DataFrame(gasu_profile_rows(roster)),
-                hide_index=True,
-                use_container_width=True,
             )
 
     active_filter = st.session_state.get("date_filter") or {}

@@ -12,7 +12,7 @@ from docx import Document
 
 from auth import cookie_manager, logout, require_login
 from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
-from report import ReportData, build_report, report_sentence
+from report import ReportData, build_report, report_chart_png, report_sentence
 
 try:
     from dotenv import load_dotenv
@@ -21,7 +21,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -343,12 +343,15 @@ def render_report_block(report: ReportData, *, author_mode: bool, has_orcid: boo
         st.warning("Поиск по фамилии без ORCID может включать однофамильцев. Для персонального отчёта лучше указать ORCID.")
     st.write(report_sentence(report))
     if report.counts:
-        chart_df = pd.DataFrame(
-            {"Публикаций": [report.counts[year] for year in report.counts]},
-            index=[str(year) for year in report.counts],
+        png = report_chart_png(report)
+        st.image(png, width=560)
+        st.download_button(
+            "Скачать график (PNG)",
+            data=png,
+            file_name="scopus_dinamika.png",
+            mime="image/png",
         )
-        st.bar_chart(chart_df, use_container_width=True)
-        st.caption("Число документов Scopus по году публикации. Пропуски лет заполнены нулями.")
+        st.caption("По году публикации. Годы без работ показаны как 0. Год к году — в таблице ниже.")
     if report.year_rows:
         st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
     if report.top_journals:

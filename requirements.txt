@@ -4,4 +4,5 @@ requests
 python-docx
 python-dotenv
 xlsxwriter
+matplotlib
 extra-streamlit-components

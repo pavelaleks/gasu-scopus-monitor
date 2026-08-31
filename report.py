@@ -178,7 +178,11 @@ DONUT_COLORS = [
 ]
 
 
-def build_area_figure(slices: list[tuple[str, int]], title: str = "Области знаний Scopus"):
+def build_area_figure(
+    slices: list[tuple[str, int]],
+    title: str = "Области знаний Scopus",
+    colors: list[str] | None = None,
+):
     import matplotlib.pyplot as plt
 
     values = [count for _, count in slices]
@@ -191,10 +195,10 @@ def build_area_figure(slices: list[tuple[str, int]], title: str = "Област�
         ax.set_axis_off()
         fig.tight_layout(pad=0.4)
         return fig
-    colors = [DONUT_COLORS[i % len(DONUT_COLORS)] for i in range(len(values))]
+    palette = colors or [DONUT_COLORS[i % len(DONUT_COLORS)] for i in range(len(values))]
     ax.pie(
         values,
-        colors=colors,
+        colors=palette,
         startangle=90,
         wedgeprops={"width": 0.48, "edgecolor": "white", "linewidth": 1.2},
     )
@@ -215,5 +219,24 @@ def build_area_figure(slices: list[tuple[str, int]], title: str = "Област�
     return fig
 
 
-def report_area_png(slices: list[tuple[str, int]], title: str = "Области знаний Scopus") -> bytes:
-    return _save_figure_png(build_area_figure(slices, title=title))
+def report_area_png(
+    slices: list[tuple[str, int]],
+    title: str = "Области знаний Scopus",
+    colors: list[str] | None = None,
+) -> bytes:
+    return _save_figure_png(build_area_figure(slices, title=title, colors=colors))
+
+
+QUARTILE_COLORS = {
+    "Q1": "#2d6a4f",
+    "Q2": "#74c69d",
+    "Q3": "#e9c46a",
+    "Q4": "#e76f51",
+    "Нет": "#adb5bd",
+}
+
+
+def report_quartile_png(rows: list[dict]) -> bytes:
+    slices = [(row["Квартиль"], int(row["Публикаций"])) for row in rows if int(row["Публикаций"])]
+    colors = [QUARTILE_COLORS.get(name, "#adb5bd") for name, _ in slices]
+    return report_area_png(slices, title="Квартили журналов SCImago", colors=colors)

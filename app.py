@@ -12,7 +12,8 @@ from docx import Document
 
 from auth import cookie_manager, logout, require_login
 from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
-from report import ReportData, build_report, report_area_png, report_chart_png, report_sentence
+from report import ReportData, build_report, report_area_png, report_chart_png, report_quartile_png, report_sentence
+from scimago import attach_scimago, format_quartile_cell, get_index, quartile_share_rows
 from subjects import area_share_rows, attach_subject_areas, extract_issns, grouped_area_counts
 
 try:
@@ -22,7 +23,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -281,6 +282,9 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Авторы": format_authors_gost(rec["authors"]),
                 "Организации": rec.get("affiliation", ""),
                 "Область знаний": rec.get("subject_areas") or "",
+                "Квартиль SCImago": format_quartile_cell(rec),
+                "SJR": rec.get("scimago_sjr") if rec.get("scimago_sjr") != "" else "",
+                "Год SJR": rec.get("scimago_year") or "",
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }
@@ -339,6 +343,9 @@ def build_xlsx(records: list[dict], report_records: list[dict] | None = None) ->
         area_rows = area_share_rows(source)
         if area_rows:
             pd.DataFrame(area_rows).to_excel(writer, index=False, sheet_name="Области знаний")
+        q_rows = quartile_share_rows(source)
+        if q_rows:
+            pd.DataFrame(q_rows).to_excel(writer, index=False, sheet_name="Квартили")
     buf.seek(0)
     return buf
 
@@ -382,6 +389,22 @@ def render_report_block(report: ReportData, records: list[dict], *, author_mode:
                 "Конференции и книги без ISSN — «Не указано»."
             )
             st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
+    q_rows = quartile_share_rows(records)
+    if q_rows:
+        png = report_quartile_png(q_rows)
+        st.image(png, width=560)
+        st.download_button(
+            "Скачать диаграмму квартилей (PNG)",
+            data=png,
+            file_name="scopus_kvartili.png",
+            mime="image/png",
+            key="download_quartile_png",
+        )
+        st.caption(
+            "Лучший квартиль журнала в SCImago. Если год статьи ещё нет в рейтинге, берётся последний закрытый год "
+            "и он указывается в скобках, например Q2 (2025). Конференции и издания без ISSN — «Нет»."
+        )
+        st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
     if report.top_journals:
         st.caption("Топ источников")
         st.dataframe(
@@ -524,6 +547,12 @@ if search_clicked:
                 for rec in records:
                     rec.setdefault("subject_abbrevs", [])
                     rec.setdefault("subject_areas", "Не указано")
+        with st.spinner("Сопоставляем квартили SCImago по ISSN журнала..."):
+            try:
+                attach_scimago(records)
+            except Exception:
+                for rec in records:
+                    rec.setdefault("scimago_quartile", "Нет")
 
     if not records:
         st.info("Статей по данному запросу не найдено.")
@@ -592,6 +621,11 @@ if "records" in st.session_state and st.session_state["records"]:
                             for rec in dyn_records:
                                 rec.setdefault("subject_abbrevs", [])
                                 rec.setdefault("subject_areas", "Не указано")
+                        try:
+                            attach_scimago(dyn_records)
+                        except Exception:
+                            for rec in dyn_records:
+                                rec.setdefault("scimago_quartile", "Нет")
                         st.session_state["dynamics_records"] = dyn_records
                         st.session_state["show_report"] = True
                         st.rerun()
@@ -615,6 +649,10 @@ if "records" in st.session_state and st.session_state["records"]:
 
     df = records_to_dataframe(records)
     st.dataframe(df, use_container_width=True)
+    st.caption(
+        "Квартиль — лучший квартиль журнала в SCImago. Если у статьи год новее рейтинга, в скобках указан год SJR "
+        f"(сейчас до {get_index().max_year or '—'}). Это не оценка текста статьи."
+    )
     if st.session_state.get("query"):
         with st.expander("Запрос Scopus"):
             st.code(st.session_state["query"])

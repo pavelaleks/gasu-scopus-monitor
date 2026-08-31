@@ -128,6 +128,8 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertTrue(author_belongs_to_gasu(gasu_author))
         self.assertFalse(author_belongs_to_gasu(other))
         self.assertIsNone(author_belongs_to_gasu(unknown))
+        id_only = {"surname": "Alekseev", "affiliation": {"@id": "https://api.elsevier.com/content/affiliation/affiliation_id/60105869"}}
+        self.assertIsNone(author_belongs_to_gasu(id_only))
 
 
 if __name__ == "__main__":

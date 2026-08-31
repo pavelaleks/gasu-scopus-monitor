@@ -43,3 +43,17 @@ def record_in_rsf_window(record: dict, window: RsfWindow) -> bool:
         value = int(year)
         return window.from_year <= value <= window.to_year
     return False
+
+
+# Нельзя подавать заявку; в мониторинге и прочих таблицах записи остаются.
+RSF_EXCLUDED_SURNAMES = frozenset({"chanchaeva", "chanchayeva", "чанчаева"})
+
+
+def rsf_name_excluded(name: str) -> bool:
+    text = " ".join((name or "").strip().lower().replace("ё", "е").split())
+    if not text:
+        return False
+    surname = text.split()[0]
+    return surname in RSF_EXCLUDED_SURNAMES or any(
+        marker in text for marker in RSF_EXCLUDED_SURNAMES
+    )

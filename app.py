@@ -56,7 +56,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -773,9 +773,8 @@ if "records" in st.session_state and st.session_state["records"]:
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
     grant_min_saved = st.session_state.get("grant_min")
     grant_rows: list[dict] = []
-    grant_gasu_only = False
     if grant_min_saved:
-        grant_rows, grant_gasu_only = rsf_applicants(records, int(grant_min_saved))
+        grant_rows, _ = rsf_applicants(records, int(grant_min_saved))
         contest = st.session_state.get("grant_contest_year")
         from_year = st.session_state.get("grant_from_year")
         st.subheader("Потенциальные грантодержатели РНФ")
@@ -790,17 +789,12 @@ if "records" in st.session_state and st.session_state["records"]:
             st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
         else:
             st.info("Никто не набрал порог по статьям Scopus с аффилиацией ГАГУ в этом окне.")
-        who = (
-            "В список вошли только авторы, у которых на статье в Scopus указана аффилиация ГАГУ. "
-            "Внешние соавторы не считаются. "
-            if grant_gasu_only
-            else "В ответе Scopus не было аффилиации по каждому автору, поэтому посчитаны все имена "
-            "на статьях ГАГУ (включая возможных внешних соавторов). "
-        )
         st.caption(
-            who
-            + "Соавторство учитывается: статья входит в показатель каждого автора ГАГУ. "
-            "Статьи того же человека без аффилиации ГАГУ сюда не попадают. "
+            "Считаются авторы статей, где в Scopus указана ГАГУ. "
+            "Если у человека в карточке нет своей организации, он всё равно входит в подсчёт — "
+            "иначе выпадают сотрудники вуза. Известные внешние соавторы и авторы, "
+            "которые заведомо не могут подать заявку, в этот список не входят. "
+            "Соавторство учитывается. Статьи того же человека без аффилиации ГАГУ сюда не попадают. "
             "Это оценка по Scopus для мониторинга, не экспертиза заявки РНФ."
         )
 

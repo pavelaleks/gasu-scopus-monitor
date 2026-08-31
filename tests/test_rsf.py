@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from rsf import record_in_rsf_window, rsf_window
+from rsf import record_in_rsf_window, rsf_name_excluded, rsf_window
 
 
 class RsfWindowTests(unittest.TestCase):
@@ -23,6 +23,11 @@ class RsfWindowTests(unittest.TestCase):
         self.assertTrue(record_in_rsf_window({"cover_date": "2021-01-15", "year": "2021"}, window))
         self.assertFalse(record_in_rsf_window({"cover_date": "2020-12-31", "year": "2020"}, window))
         self.assertTrue(record_in_rsf_window({"cover_date": "", "year": "2023"}, window))
+
+    def test_chanchaeva_is_excluded_from_rsf_list(self):
+        self.assertTrue(rsf_name_excluded("Chanchaeva E.A."))
+        self.assertTrue(rsf_name_excluded("Чанчаева Е.А."))
+        self.assertFalse(rsf_name_excluded("Alekseev P.V."))
 
 
 if __name__ == "__main__":

@@ -260,9 +260,22 @@ def author_belongs_to_gasu(author: dict) -> bool | None:
         items.append(aff)
     if not items:
         return None
-    if any(_affiliation_dict_is_gasu(item) for item in items):
-        return True
-    return False
+    saw_name = False
+    for item in items:
+        name = (
+            item.get("affilname")
+            or item.get("affiliation-name")
+            or item.get("name")
+            or ""
+        ).strip()
+        city = (item.get("affiliation-city") or item.get("city") or "").strip()
+        if name or city:
+            saw_name = True
+        if _affiliation_dict_is_gasu(item):
+            return True
+    if saw_name:
+        return False
+    return None
 
 
 def format_affiliations(entry: dict, ensure_gasu: bool = False) -> str:

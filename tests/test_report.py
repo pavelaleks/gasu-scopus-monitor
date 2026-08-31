@@ -135,10 +135,25 @@ class ReportTests(unittest.TestCase):
         records.append(
             {"authors": [{"surname": "Sidorov", "given": "S", "initials": "S.", "from_gasu": True}]}
         )
-        rows, gasu_only = rsf_applicants(records, 8)
-        self.assertTrue(gasu_only)
+        rows, skipped_external = rsf_applicants(records, 8)
+        self.assertTrue(skipped_external)
         self.assertEqual([row["Автор"] for row in rows], ["Ivanov I."])
         self.assertEqual(rows[0]["Публикаций"], 8)
+
+    def test_rsf_includes_author_without_personal_affiliation(self):
+        records = [
+            {
+                "authors": [
+                    {"surname": "Alekseev", "given": "Pavel", "initials": "P.V.", "from_gasu": None},
+                    {"surname": "Chanchaeva", "given": "E", "initials": "E.A.", "from_gasu": True},
+                ]
+            }
+            for _ in range(8)
+        ]
+        rows, _ = rsf_applicants(records, 8)
+        names = [row["Автор"] for row in rows]
+        self.assertEqual(names, ["Alekseev P.V."])
+        self.assertTrue(all("Chanchaeva" not in name and "Чанчаева" not in name for name in names))
 
 
 if __name__ == "__main__":

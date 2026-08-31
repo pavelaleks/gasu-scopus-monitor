@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from io import BytesIO
 
 from gasu import is_gasu_name
+from rsf import rsf_name_excluded
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,7 @@ def author_stats(records: list[dict], *, only_gasu: bool = False, limit: int | N
             quartile = "Нет"
         seen: set[str] = set()
         for author in rec.get("authors") or []:
-            if only_gasu and author.get("from_gasu") is not True:
+            if only_gasu and author.get("from_gasu") is False:
                 continue
             key = author_merge_key(author)
             if not key or key in seen:
@@ -227,14 +228,24 @@ def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
 
 
 def rsf_applicants(records: list[dict], min_papers: int) -> tuple[list[dict], bool]:
-    """Авторы с числом статей ≥ порога. True, если отфильтрованы только сотрудники ГАГУ."""
-    flagged = any(
-        author.get("from_gasu") is True
+    """Авторы с числом статей ≥ порога на работах ГАГУ.
+
+    Известных внешних соавторов (from_gasu is False) не считаем, но автора без
+    персональной аффилиации в ответе Scopus не отбрасываем — иначе выпадают
+    сотрудники вуза вроде Алексеева. Умерших в этот список не включаем.
+    """
+    skipped_external = any(
+        author.get("from_gasu") is False
         for rec in records
         for author in rec.get("authors") or []
     )
-    rows = author_stats(records, only_gasu=flagged)
-    return [row for row in rows if int(row["Публикаций"]) >= min_papers], flagged
+    rows = author_stats(records, only_gasu=True)
+    eligible = [
+        row
+        for row in rows
+        if int(row["Публикаций"]) >= min_papers and not rsf_name_excluded(str(row.get("Автор") or ""))
+    ]
+    return eligible, skipped_external
 
 
 def report_sentence(report: ReportData) -> str:

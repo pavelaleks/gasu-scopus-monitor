@@ -176,6 +176,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual([row["Автор"] for row in rows], ["Alekseev P.V."])
         self.assertNotIn("authid", rows[0])
 
+    def test_rsf_merges_alekseev_p_and_pv(self):
+        records = [
+            {"authors": [{"surname": "Alekseev", "initials": "P."}]},
+            {"authors": [{"surname": "Alekseev", "initials": "P.V."}]},
+        ]
+        rows = rsf_candidates(records)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["С ГАГУ"], 2)
+        self.assertIn("Alekseev", rows[0]["Автор"])
+
 
 if __name__ == "__main__":
     unittest.main()

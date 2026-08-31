@@ -296,16 +296,8 @@ def author_name_query(
     year_start: int | None = None,
     year_end: int | None = None,
 ) -> str:
-    """Поиск статей человека по фамилии и инициалам, без фильтра ГАГУ."""
-    last = quoted(surname)
-    letters = [ch.upper() for ch in (initials or "") if ch.isalpha()]
-    if not letters:
-        letters = [word[0].upper() for word in (given or "").replace(".", " ").split() if word]
-    query = f"AUTHLAST({last})"
-    if len(letters) >= 2:
-        query += f" AND AUTHFIRST({quoted('.'.join(letters[:2]) + '.')})"
-    elif letters:
-        query += f" AND AUTHFIRST({quoted(letters[0] + '.')})"
+    """Тот же запрос, что «Поиск по автору» без ORCID: AUTH(фамилия) и годы."""
+    query = f"AUTH({quoted(surname)})"
     if year_start is not None and year_end is not None:
         query += f" AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
     return query

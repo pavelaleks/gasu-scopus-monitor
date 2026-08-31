@@ -277,8 +277,27 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
     }
 
 
+def _merge_author_bucket(dest: dict, src: dict) -> None:
+    dest["names"].update(src["names"])
+    dest["gasu_n"] += src["gasu_n"]
+    dest["Q1"] += src["Q1"]
+    dest["Q2"] += src["Q2"]
+    dest["Q3"] += src["Q3"]
+    dest["Q4"] += src["Q4"]
+    dest["none"] += src["none"]
+    dest["flags"].update(src["flags"])
+    if src.get("authid") and not dest.get("authid"):
+        dest["authid"] = src["authid"]
+    if src.get("surname") and not dest.get("surname"):
+        dest["surname"] = src["surname"]
+    if src.get("given") and not dest.get("given"):
+        dest["given"] = src["given"]
+    if src.get("initials") and not dest.get("initials"):
+        dest["initials"] = src["initials"]
+
+
 def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
-    """Склеить одного человека, если часть записей без Author ID."""
+    """Склеить одного человека: с ID и без, «Alekseev P.» и «Alekseev P.V.»."""
     by_surname: dict[str, list[str]] = {}
     for key, bucket in buckets.items():
         if not bucket["names"]:
@@ -289,21 +308,21 @@ def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
     for keys in by_surname.values():
         id_keys = [key for key in keys if key.startswith("id|")]
         other = [key for key in keys if not key.startswith("id|")]
-        if len(id_keys) != 1 or not other:
+        if len(id_keys) == 1 and other:
+            dest = buckets[id_keys[0]]
+            for src_key in other:
+                _merge_author_bucket(dest, buckets.pop(src_key))
             continue
-        dest = buckets[id_keys[0]]
-        for src_key in other:
-            src = buckets.pop(src_key)
-            dest["names"].update(src["names"])
-            dest["gasu_n"] += src["gasu_n"]
-            dest["Q1"] += src["Q1"]
-            dest["Q2"] += src["Q2"]
-            dest["Q3"] += src["Q3"]
-            dest["Q4"] += src["Q4"]
-            dest["none"] += src["none"]
-            dest["flags"].update(src["flags"])
-            if src.get("authid") and not dest.get("authid"):
-                dest["authid"] = src["authid"]
+        if id_keys:
+            continue
+        initials = {key.split("|", 1)[-1] for key in keys if "|" in key}
+        initials.discard("")
+        if len(keys) > 1 and len(initials) <= 1:
+            dest_key = next((key for key in keys if key.split("|", 1)[-1]), keys[0])
+            dest = buckets[dest_key]
+            for src_key in keys:
+                if src_key != dest_key:
+                    _merge_author_bucket(dest, buckets.pop(src_key))
 
 
 def rsf_candidates(gasu_records: list[dict]) -> list[dict]:

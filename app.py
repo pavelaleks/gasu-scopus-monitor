@@ -68,7 +68,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -417,17 +417,22 @@ def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple
             if authid:
                 query = author_id_query(authid, window.from_year, window.to_year)
                 total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total, "все статьи автора")
+                apply_author_total(row, total, "конкретный автор (AU-ID)")
             else:
-                query = author_name_query(
+                query = build_query(
+                    "Поиск по автору",
                     cand.get("surname") or "",
-                    cand.get("initials") or "",
-                    cand.get("given") or "",
-                    window.from_year,
-                    window.to_year,
+                    "",
+                    {
+                        "mode": "range",
+                        "year": window.from_year,
+                        "year_start": window.from_year,
+                        "year_end": window.to_year,
+                    },
+                    False,
                 )
                 total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total, "по фамилии и инициалам")
+                apply_author_total(row, total, "как поиск по автору (фамилия)")
                 named += 1
         except Exception:
             failed += 1
@@ -910,14 +915,14 @@ if "records" in st.session_state and st.session_state["records"]:
         if people and counted == 0:
             st.warning("Не удалось посчитать полный Scopus ни у одного автора. Показаны только статьи с ГАГУ.")
         st.caption(
-            "Порог — все статьи Scopus автора за окно, не только с ГАГУ. "
-            "Связь с вузом: есть хотя бы одна статья ГАГУ. "
-            "Если Scopus не даёт Author ID, считаем AUTHLAST + инициалы "
-            "(однофамильцы возможны). Совместитель тоже может попасть — смотрите «С ГАГУ». "
+            "Порог считается так же, как «Поиск по автору»: AUTH(фамилия) за окно лет, "
+            "без фильтра ГАГУ. ORCID нет — возможны однофамильцы, как в том режиме. "
+            "Если Scopus дал Author ID, берётся конкретный человек (AU-ID). "
+            "Связь с вузом: есть хотя бы одна статья ГАГУ. Смотрите «С ГАГУ» у совместителей. "
             "Это оценка для мониторинга, не экспертиза заявки."
             + (
                 f" Полный список посчитан у {counted} из {people} авторов"
-                + (f" ({named} по фамилии)." if named else ".")
+                + (f" ({named} запросом как поиск по автору)." if named else ".")
                 if people
                 else ""
             )

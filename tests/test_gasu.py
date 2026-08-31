@@ -11,6 +11,7 @@ from gasu import (
     format_affiliations,
     gasu_affiliation_clause,
     has_gasu_affiliation,
+    parse_authors,
     record_has_gasu,
     scopus_authid,
 )
@@ -141,6 +142,50 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertEqual(author_id_query("57202111111", 2021, 2026), "AU-ID(57202111111) AND PUBYEAR > 2020 AND PUBYEAR < 2027")
         self.assertTrue(record_has_gasu({"affiliation": "Gorno-Altaisk State University; Tomsk State University"}))
         self.assertFalse(record_has_gasu({"affiliation": "Tomsk State University"}))
+
+    def test_parse_authors_from_complete_and_abstract(self):
+        complete = {
+            "author": [
+                {
+                    "authid": "57200000001",
+                    "surname": "Alekseev",
+                    "given-name": "Pavel",
+                    "initials": "P.V.",
+                },
+                {
+                    "@auid": "57200000002",
+                    "authname": "Kyrov, V.N.",
+                },
+            ]
+        }
+        names = {(a["surname"], a["authid"]) for a in parse_authors(complete)}
+        self.assertEqual(
+            names,
+            {("Alekseev", "57200000001"), ("Kyrov", "57200000002")},
+        )
+        abstract = {
+            "abstracts-retrieval-response": {
+                "authors": {
+                    "author": [
+                        {
+                            "@auid": "57200000001",
+                            "preferred-name": {
+                                "ce:surname": "Alekseev",
+                                "ce:given-name": "Pavel V.",
+                                "ce:initials": "P.V.",
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+        parsed = parse_authors(abstract)
+        self.assertEqual(parsed[0]["surname"], "Alekseev")
+        self.assertEqual(parsed[0]["authid"], "57200000001")
+        self.assertEqual(
+            scopus_authid({"@auid": "57200000009"}),
+            "57200000009",
+        )
 
 
 if __name__ == "__main__":

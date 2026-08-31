@@ -326,6 +326,128 @@ def author_belongs_to_gasu(author: dict) -> bool | None:
     return None
 
 
+def iter_author_items(entry: dict) -> list[dict]:
+    """Достаёт словари авторов из search COMPLETE, STANDARD и abstract retrieval."""
+    if not isinstance(entry, dict):
+        return []
+    blobs: list[object] = []
+    for key in ("author", "authors", "author-list"):
+        if key in entry:
+            blobs.append(entry[key])
+    inner = entry.get("abstracts-retrieval-response")
+    if isinstance(inner, dict):
+        authors = inner.get("authors")
+        if authors is not None:
+            blobs.append(authors)
+    found: list[dict] = []
+    queue: list[object] = list(blobs)
+    while queue:
+        raw = queue.pop(0)
+        if isinstance(raw, list):
+            queue.extend(raw)
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if any(
+            key in raw
+            for key in (
+                "surname",
+                "ce:surname",
+                "authid",
+                "@auid",
+                "authname",
+                "preferred-name",
+                "given-name",
+                "ce:given-name",
+                "author-url",
+            )
+        ):
+            found.append(raw)
+            continue
+        for key in ("author", "authors"):
+            if key in raw:
+                queue.append(raw[key])
+    return found
+
+
+def parse_author_item(item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    preferred = item.get("preferred-name")
+    if not isinstance(preferred, dict):
+        preferred = {}
+    surname = (
+        item.get("surname")
+        or item.get("ce:surname")
+        or preferred.get("ce:surname")
+        or preferred.get("surname")
+        or ""
+    ).strip()
+    given = (
+        item.get("given-name")
+        or item.get("ce:given-name")
+        or preferred.get("ce:given-name")
+        or ""
+    ).strip()
+    initials = (
+        item.get("initials")
+        or item.get("ce:initials")
+        or preferred.get("ce:initials")
+        or ""
+    ).strip()
+    if not surname:
+        authname = (
+            item.get("authname")
+            or item.get("ce:indexed-name")
+            or preferred.get("ce:indexed-name")
+            or ""
+        ).strip()
+        if "," in authname:
+            surname, rest = [part.strip() for part in authname.split(",", 1)]
+            if not given:
+                given = rest
+        elif authname:
+            parts = authname.split()
+            surname = parts[0]
+            if not given and len(parts) > 1:
+                given = " ".join(parts[1:])
+    authid = scopus_authid(item) or scopus_authid(preferred)
+    if not surname and not authid:
+        return None
+    return {
+        "surname": surname,
+        "given": given,
+        "initials": initials,
+        "from_gasu": author_belongs_to_gasu(item),
+        "authid": authid,
+    }
+
+
+def parse_authors(entry: dict) -> list[dict]:
+    authors = []
+    seen: set[str] = set()
+    for item in iter_author_items(entry):
+        parsed = parse_author_item(item)
+        if not parsed:
+            continue
+        key = parsed.get("authid") or f"{parsed.get('surname')}|{parsed.get('given')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        authors.append(parsed)
+    if authors:
+        return authors
+    creator = (entry.get("dc:creator") or "").strip()
+    if not creator:
+        return []
+    parts = [p.strip() for p in creator.split(",") if p.strip()]
+    if len(parts) >= 2:
+        surname, given = parts[0], parts[1]
+    else:
+        surname, given = creator, ""
+    return [{"surname": surname, "given": given, "initials": "", "from_gasu": None, "authid": ""}]
+
+
 def format_affiliations(entry: dict, ensure_gasu: bool = False) -> str:
     names = affiliation_names(entry)
     if any(is_gasu_name(name) for name in names):

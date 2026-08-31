@@ -168,7 +168,7 @@ def report_scope_label(
     return f"{who}, {period}"
 
 
-def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
+def author_stats(records: list[dict], *, only_gasu: bool = False, limit: int | None = None) -> list[dict]:
     buckets: dict[str, dict] = {}
     for rec in records:
         quartile = rec.get("scimago_quartile") or "Нет"
@@ -176,6 +176,8 @@ def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
             quartile = "Нет"
         seen: set[str] = set()
         for author in rec.get("authors") or []:
+            if only_gasu and author.get("from_gasu") is not True:
+                continue
             key = author_merge_key(author)
             if not key or key in seen:
                 continue
@@ -215,7 +217,24 @@ def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
             }
         )
     rows.sort(key=lambda row: (-row["Публикаций"], -row["Q1"], row["Автор"].lower()))
+    if limit is None:
+        return rows
     return rows[:limit]
+
+
+def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
+    return author_stats(records, limit=limit)
+
+
+def rsf_applicants(records: list[dict], min_papers: int) -> tuple[list[dict], bool]:
+    """Авторы с числом статей ≥ порога. True, если отфильтрованы только сотрудники ГАГУ."""
+    flagged = any(
+        author.get("from_gasu") is True
+        for rec in records
+        for author in rec.get("authors") or []
+    )
+    rows = author_stats(records, only_gasu=flagged)
+    return [row for row in rows if int(row["Публикаций"]) >= min_papers], flagged
 
 
 def report_sentence(report: ReportData) -> str:
@@ -231,12 +250,18 @@ def build_report_figure(report: ReportData):
 
     years = list(report.counts)
     values = [report.counts[year] for year in years]
-    fig, ax = plt.subplots(figsize=(6.4, 2.35), dpi=120)
+    n = len(years)
+    width = min(11.0, max(6.4, 0.28 * n))
+    fig, ax = plt.subplots(figsize=(width, 2.45), dpi=120)
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
-    bars = ax.bar(range(len(years)), values, color="#3d5a80", width=0.62)
-    ax.set_xticks(range(len(years)))
+    bars = ax.bar(range(n), values, color="#3d5a80", width=0.62 if n < 18 else 0.78)
+    ax.set_xticks(range(n))
     ax.set_xticklabels([str(year) for year in years])
+    if n > 12:
+        ax.tick_params(axis="x", labelrotation=60)
+        for label in ax.get_xticklabels():
+            label.set_horizontalalignment("right")
     ax.set_ylabel("Число публикаций")
     ax.set_xlabel("Год публикации")
     ax.set_title("Публикации в Scopus", pad=8, fontsize=11)

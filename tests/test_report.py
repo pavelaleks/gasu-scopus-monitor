@@ -8,6 +8,7 @@ from report import (
     report_quartile_png,
     report_scope_label,
     report_sentence,
+    rsf_applicants,
     ru_publications,
     top_authors,
 )
@@ -120,6 +121,24 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(by_name["Petrov P.P."]["Публикаций"], 2)
         self.assertEqual(by_name["Petrov P.P."]["Без квартиля"], 1)
         self.assertEqual(rows[0]["Автор"], "Ivanov I.I.")
+
+    def test_rsf_applicants_keep_gasu_authors_above_threshold(self):
+        records = [
+            {
+                "authors": [
+                    {"surname": "Ivanov", "given": "I", "initials": "I.", "from_gasu": True},
+                    {"surname": "Petrov", "given": "P", "initials": "P.", "from_gasu": False},
+                ]
+            }
+            for _ in range(8)
+        ]
+        records.append(
+            {"authors": [{"surname": "Sidorov", "given": "S", "initials": "S.", "from_gasu": True}]}
+        )
+        rows, gasu_only = rsf_applicants(records, 8)
+        self.assertTrue(gasu_only)
+        self.assertEqual([row["Автор"] for row in rows], ["Ivanov I."])
+        self.assertEqual(rows[0]["Публикаций"], 8)
 
 
 if __name__ == "__main__":

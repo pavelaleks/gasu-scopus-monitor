@@ -11,7 +11,14 @@ import streamlit as st
 from docx import Document
 
 from auth import cookie_manager, logout, require_login
-from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
+from gasu import (
+    GASU_FOUNDED_YEAR,
+    author_belongs_to_gasu,
+    build_query,
+    entry_belongs_to_gasu,
+    format_affiliations,
+    query_targets_gasu,
+)
 from report import (
     ReportData,
     build_report,
@@ -20,9 +27,11 @@ from report import (
     report_quartile_png,
     report_scope_label,
     report_sentence,
+    rsf_applicants,
     ru_publications,
     top_authors,
 )
+from rsf import record_in_rsf_window, rsf_window
 from scimago import (
     attach_scimago,
     format_quartile_cell,
@@ -47,7 +56,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.7.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -126,7 +135,14 @@ def parse_authors(entry: dict) -> list[dict]:
             initials = (item.get("initials") or "").strip()
             if not given and initials:
                 given = normalize_initials(initials)
-            authors.append({"surname": surname, "given": given, "initials": initials})
+            authors.append(
+                {
+                    "surname": surname,
+                    "given": given,
+                    "initials": initials,
+                    "from_gasu": author_belongs_to_gasu(item),
+                }
+            )
     creator = (entry.get("dc:creator") or "").strip()
     if not authors and creator:
         parts = [p.strip() for p in creator.split(",")]
@@ -214,6 +230,13 @@ def make_date_filter(mode: str, start_year: int | None, end_year: int | None) ->
     if mode == "last5":
         start = current_year - 4
         return {"mode": "range", "year": current_year, "year_start": start, "year_end": current_year}
+    if mode == "since_founding":
+        return {
+            "mode": "range",
+            "year": current_year,
+            "year_start": GASU_FOUNDED_YEAR,
+            "year_end": current_year,
+        }
     if mode == "range" and start_year and end_year:
         return {"mode": "range", "year": start_year, "year_start": start_year, "year_end": end_year}
     return None
@@ -377,6 +400,7 @@ def build_xlsx(
     report_records: list[dict] | None = None,
     *,
     university: bool = False,
+    grant_rows: list[dict] | None = None,
 ) -> BytesIO:
     df = records_to_dataframe(records)
     df["ГОСТ 7.0.5"] = [format_gost(r) for r in records]
@@ -392,6 +416,8 @@ def build_xlsx(
             authors = top_authors(source, 20)
             if authors:
                 pd.DataFrame(authors).to_excel(writer, index=False, sheet_name="Авторы")
+        if grant_rows:
+            pd.DataFrame(grant_rows).to_excel(writer, index=False, sheet_name="РНФ")
         if report.top_journals:
             pd.DataFrame(report.top_journals, columns=["Источник", "Публикаций"]).to_excel(
                 writer, index=False, sheet_name="Источники"
@@ -414,6 +440,7 @@ def render_report_block(
     has_orcid: bool,
     university: bool,
     author_last: str = "",
+    show_top_authors: bool = True,
 ) -> None:
     st.subheader("Динамика для отчёта")
     if author_mode and not has_orcid:
@@ -433,36 +460,20 @@ def render_report_block(
     if report.year_rows:
         st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
 
-    years = [str(year) for year in report.counts]
-    if years:
-        period = report.year_label
-        all_label = f"Весь период ({period})"
-        st.markdown("**Состав выборки**")
-        st.caption(
-            f"Столбцы выше — сколько публикаций в каждом году. "
-            f"Круги по умолчанию складывают все статьи найденного периода "
-            f"{period} ({ru_publications(report.total)}). "
-            "Это годы текущего поиска, а не вся история университета. "
-            "Кнопка с одним годом показывает только его состав; столбцы при этом не меняются."
-        )
-        if len(years) == 1:
-            year_filter = years[0]
-        else:
-            year_choice = st.radio(
-                "Что показать на кругах",
-                [all_label, *years],
-                horizontal=True,
-                key="area_chart_year",
-            )
-            year_filter = None if year_choice == all_label else year_choice
+    if records:
         scope = report_scope_label(
             records,
             university=university,
             author_last=author_last,
-            year=year_filter,
         )
-        area_rows = area_share_rows(records, year_filter)
-        q_rows = quartile_share_rows(records, year_filter)
+        area_rows = area_share_rows(records)
+        q_rows = quartile_share_rows(records)
+        st.markdown("**Состав выборки**")
+        st.caption(
+            f"Круги — области знаний и квартили всех статей текущего поиска "
+            f"({scope}, {ru_publications(report.total)}). "
+            "Период задаётся при поиске: текущий год, последние 5 лет, свой диапазон или с 1993 года."
+        )
         png = report_area_png(
             grouped_area_counts(area_rows),
             title=f"{scope} · области знаний",
@@ -492,18 +503,12 @@ def render_report_block(
                 key="download_quartile_png",
                 use_container_width=True,
             )
-        slice_count = (
-            report.total
-            if year_filter is None
-            else int(report.counts.get(int(year_filter), 0))
-        )
         st.caption(
-            f"{scope}: {ru_publications(slice_count)}. "
             "Слева — основная область журнала в Scopus (одна статья — один сектор; "
             "без ISSN — «Не указано»). Справа — лучший квартиль журнала SCImago; "
             "если года статьи ещё нет в рейтинге, берётся последний закрытый год."
         )
-        if slice_count:
+        if report.total:
             detail_left, detail_right = st.columns(2, gap="medium")
             with detail_left:
                 if area_rows:
@@ -512,7 +517,7 @@ def render_report_block(
                 if q_rows:
                     st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
 
-    if university:
+    if university and show_top_authors:
         st.markdown("**Наиболее активные авторы**")
         top_n = st.radio(
             "Размер списка",
@@ -569,6 +574,9 @@ if st.session_state.get("records_version") != APP_VERSION:
         "issn_subject_cache",
         "area_chart_year",
         "top_authors_n",
+        "grant_min",
+        "grant_contest_year",
+        "grant_from_year",
     ):
         st.session_state.pop(key, None)
 
@@ -615,13 +623,32 @@ st.caption(
     "аффилиаций (в том числе вместе с другими организациями)."
 )
 
-quick_col, _ = st.columns([2, 3])
-with quick_col:
+window = rsf_window()
+quick1, quick2, quick3 = st.columns(3)
+with quick1:
     quick_check = st.button(
-        "Проверить статьи ГАГУ за текущий год",
+        "Статьи ГАГУ за текущий год",
         type="primary",
         use_container_width=True,
+        key="quick_year",
     )
+with quick2:
+    quick_rsf8 = st.button(
+        f"РНФ {window.contest_year}, от 8 статей",
+        use_container_width=True,
+        key="quick_rsf8",
+    )
+with quick3:
+    quick_rsf5 = st.button(
+        f"РНФ {window.contest_year}, от 5 статей",
+        use_container_width=True,
+        key="quick_rsf5",
+    )
+st.caption(
+    f"РНФ: ближайший конкурс — {window.contest_year} год. "
+    f"Считаются статьи Scopus с {window.from_label} (для конкурса Y — с января Y−6, окно сдвигается само). "
+    "В список попадают авторы, у которых на статье указана аффилиация ГАГУ."
+)
 
 mode = st.radio("Режим поиска", ["Мониторинг ГАГУ", "Поиск по автору"], horizontal=True)
 
@@ -635,7 +662,7 @@ if mode == "Поиск по автору":
 
 time_filter = st.radio(
     "Период",
-    ["Текущий год", "Диапазон лет", "Последние 5 лет"],
+    ["Текущий год", "Последние 5 лет", "Диапазон лет", "С 1993 года"],
     horizontal=True,
 )
 start_year = None
@@ -648,10 +675,16 @@ if time_filter == "Диапазон лет":
         end_year = st.number_input("По", min_value=1900, max_value=2100, value=datetime.now().year, step=1)
 
 search_clicked = st.button("Найти публикации")
+grant_min = None
 
 if quick_check:
     mode = "Мониторинг ГАГУ"
     time_filter = "Текущий год"
+    search_clicked = True
+elif quick_rsf8 or quick_rsf5:
+    mode = "Мониторинг ГАГУ"
+    time_filter = "РНФ"
+    grant_min = 8 if quick_rsf8 else 5
     search_clicked = True
 
 date_filter = None
@@ -659,6 +692,15 @@ if time_filter == "Текущий год":
     date_filter = make_date_filter("current", None, None)
 elif time_filter == "Последние 5 лет":
     date_filter = make_date_filter("last5", None, None)
+elif time_filter == "С 1993 года":
+    date_filter = make_date_filter("since_founding", None, None)
+elif time_filter == "РНФ":
+    date_filter = {
+        "mode": "range",
+        "year": window.from_year,
+        "year_start": window.from_year,
+        "year_end": window.to_year,
+    }
 else:
     date_filter = make_date_filter("range", int(start_year), int(end_year))
 
@@ -677,7 +719,17 @@ if search_clicked:
             st.error("Ошибка запроса к Scopus API.")
             st.code(str(exc))
             st.stop()
-    if records:
+    if records and grant_min:
+        records = [rec for rec in records if record_in_rsf_window(rec, window)]
+        for rec in records:
+            rec.setdefault("subject_abbrevs", [])
+            rec.setdefault("subject_areas", "Не указано")
+        try:
+            attach_scimago(records)
+        except Exception:
+            for rec in records:
+                rec.setdefault("scimago_quartile", "Нет")
+    elif records:
         with st.spinner("Определяем области знаний по журналам Scopus..."):
             try:
                 fill_subject_areas(records, api_key)
@@ -706,11 +758,51 @@ if search_clicked:
     st.session_state["only_gasu"] = only_gasu
     st.session_state["show_report"] = False
     st.session_state.pop("dynamics_records", None)
+    if grant_min:
+        st.session_state["grant_min"] = grant_min
+        st.session_state["grant_contest_year"] = window.contest_year
+        st.session_state["grant_from_year"] = window.from_year
+    else:
+        st.session_state.pop("grant_min", None)
+        st.session_state.pop("grant_contest_year", None)
+        st.session_state.pop("grant_from_year", None)
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
     active_date_filter = st.session_state.get("date_filter")
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
+    grant_min_saved = st.session_state.get("grant_min")
+    grant_rows: list[dict] = []
+    grant_gasu_only = False
+    if grant_min_saved:
+        grant_rows, grant_gasu_only = rsf_applicants(records, int(grant_min_saved))
+        contest = st.session_state.get("grant_contest_year")
+        from_year = st.session_state.get("grant_from_year")
+        st.subheader("Потенциальные грантодержатели РНФ")
+        st.write(
+            f"Конкурс {contest}: публикации Scopus с января {from_year}. "
+            f"Порог — не менее {grant_min_saved} статей."
+        )
+        g1, g2 = st.columns(2)
+        g1.metric("Могут подавать сейчас", len(grant_rows))
+        g2.metric("Статей ГАГУ в окне", len(records))
+        if grant_rows:
+            st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info("Никто не набрал порог по статьям Scopus с аффилиацией ГАГУ в этом окне.")
+        who = (
+            "В список вошли только авторы, у которых на статье в Scopus указана аффилиация ГАГУ. "
+            "Внешние соавторы не считаются. "
+            if grant_gasu_only
+            else "В ответе Scopus не было аффилиации по каждому автору, поэтому посчитаны все имена "
+            "на статьях ГАГУ (включая возможных внешних соавторов). "
+        )
+        st.caption(
+            who
+            + "Соавторство учитывается: статья входит в показатель каждого автора ГАГУ. "
+            "Статьи того же человека без аффилиации ГАГУ сюда не попадают. "
+            "Это оценка по Scopus для мониторинга, не экспертиза заявки РНФ."
+        )
 
     st.subheader("Результаты")
     slice_report = build_report(records)
@@ -779,6 +871,7 @@ if "records" in st.session_state and st.session_state["records"]:
                 has_orcid=bool(st.session_state.get("author_orcid")),
                 university=(st.session_state.get("search_mode") != "Поиск по автору"),
                 author_last=st.session_state.get("author_last") or "",
+                show_top_authors=not grant_min_saved,
             )
         else:
             st.info("За этот период публикаций не найдено.")
@@ -806,6 +899,7 @@ if "records" in st.session_state and st.session_state["records"]:
         records_for_list,
         st.session_state.get("dynamics_records") or records,
         university=(st.session_state.get("search_mode") != "Поиск по автору"),
+        grant_rows=grant_rows or None,
     )
 
     col1, col2 = st.columns(2)

@@ -14,6 +14,7 @@ from __future__ import annotations
 # Исторический id из первой версии приложения. Не используем в запросе:
 # по нему Scopus отдавал чужие организации, а код ещё и подписывал их как ГАГУ.
 AFFILIATION_ID = "60105869"
+GASU_FOUNDED_YEAR = 1993
 GASU_PREFERRED_NAME = "Gorno-Altaisk State University"
 AFFILIATION_NAMES = [
     "Gorno-Altaisk State University",
@@ -232,6 +233,36 @@ def entry_belongs_to_gasu(entry: dict) -> bool:
 
 def has_gasu_affiliation(entry: dict) -> bool:
     return entry_belongs_to_gasu(entry)
+
+
+def _affiliation_dict_is_gasu(item: dict) -> bool:
+    name = (
+        item.get("affilname")
+        or item.get("affiliation-name")
+        or item.get("name")
+        or ""
+    ).strip()
+    city = (item.get("affiliation-city") or item.get("city") or "").strip()
+    if is_gasu_name(name):
+        return True
+    return bool(is_gasu_city(city) and (is_gasu_name(name) or looks_like_university(name)))
+
+
+def author_belongs_to_gasu(author: dict) -> bool | None:
+    """True/False, если у автора в Scopus есть свои аффилиации; иначе None."""
+    if not isinstance(author, dict):
+        return None
+    items: list[dict] = []
+    aff = author.get("affiliation")
+    if isinstance(aff, list):
+        items.extend(item for item in aff if isinstance(item, dict))
+    elif isinstance(aff, dict):
+        items.append(aff)
+    if not items:
+        return None
+    if any(_affiliation_dict_is_gasu(item) for item in items):
+        return True
+    return False
 
 
 def format_affiliations(entry: dict, ensure_gasu: bool = False) -> str:

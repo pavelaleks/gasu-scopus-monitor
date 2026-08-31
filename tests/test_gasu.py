@@ -2,7 +2,9 @@ import unittest
 
 from gasu import (
     AFFILIATION_ID,
+    GASU_FOUNDED_YEAR,
     GASU_PREFERRED_NAME,
+    author_belongs_to_gasu,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
@@ -41,6 +43,18 @@ class GasuQueryTests(unittest.TestCase):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)
         self.assertIn("AFFILORG(", query)
         self.assertIn("Alekseev", query)
+
+    def test_since_founding_uses_1993(self):
+        self.assertEqual(GASU_FOUNDED_YEAR, 1993)
+        query = build_query(
+            "Мониторинг ГАГУ",
+            "",
+            "",
+            {"mode": "range", "year": 2026, "year_start": GASU_FOUNDED_YEAR, "year_end": 2026},
+            False,
+        )
+        self.assertIn("PUBYEAR > 1992", query)
+        self.assertIn("PUBYEAR < 2027", query)
 
 
 class MultiAffiliationTests(unittest.TestCase):
@@ -106,6 +120,14 @@ class MultiAffiliationTests(unittest.TestCase):
     def test_altai_state_university_is_not_gasu(self):
         entry = {"affiliation": [{"affilname": "Altai State University"}]}
         self.assertFalse(has_gasu_affiliation(entry))
+
+    def test_author_belongs_to_gasu_from_own_affiliation(self):
+        gasu_author = {"surname": "Ivanov", "affiliation": {"affilname": "Gorno-Altaisk State University"}}
+        other = {"surname": "Petrov", "affiliation": {"affilname": "Tomsk State University"}}
+        unknown = {"surname": "Sidorov"}
+        self.assertTrue(author_belongs_to_gasu(gasu_author))
+        self.assertFalse(author_belongs_to_gasu(other))
+        self.assertIsNone(author_belongs_to_gasu(unknown))
 
 
 if __name__ == "__main__":

@@ -31,17 +31,6 @@ from gasu import (
     pick_scopus_authid,
     query_targets_gasu,
 )
-    author_papers_query,
-    author_profile_query,
-    build_query,
-    entry_belongs_to_gasu,
-    first_initial,
-    format_affiliations,
-    needs_author_enrichment,
-    parse_authors,
-    pick_scopus_authid,
-    query_targets_gasu,
-)
 from report import (
     ReportData,
     build_report,

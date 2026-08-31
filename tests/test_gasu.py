@@ -6,13 +6,16 @@ from gasu import (
     GASU_PREFERRED_NAME,
     author_belongs_to_gasu,
     author_id_query,
-    author_name_query,
+    author_papers_query,
+    author_profile_query,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
     has_gasu_affiliation,
+    match_authid_on_paper,
     parse_authors,
+    pick_scopus_authid,
     record_has_gasu,
     scopus_authid,
 )
@@ -141,10 +144,17 @@ class MultiAffiliationTests(unittest.TestCase):
             "57202111111",
         )
         self.assertEqual(author_id_query("57202111111", 2021, 2026), "AU-ID(57202111111) AND PUBYEAR > 2020 AND PUBYEAR < 2027")
-        self.assertEqual(
-            author_name_query("Alekseev", "P.V.", year_start=2021, year_end=2026),
-            'AUTH("Alekseev") AND PUBYEAR > 2020 AND PUBYEAR < 2027',
+        profile = author_profile_query("Alekseev", "P.V.")
+        self.assertIn('AUTHLAST("Alekseev")', profile)
+        self.assertIn("AUTHFIRST(P)", profile)
+        self.assertIn("AFFIL(", profile)
+        self.assertNotIn("AUTH(", profile.replace("AUTHLAST", "").replace("AUTHFIRST", ""))
+        papers = author_papers_query(
+            "57202111111",
+            {"mode": "range", "year_start": 2021, "year_end": 2026},
+            False,
         )
+        self.assertEqual(papers, "AU-ID(57202111111) AND PUBYEAR > 2020 AND PUBYEAR < 2027")
         self.assertTrue(record_has_gasu({"affiliation": "Gorno-Altaisk State University; Tomsk State University"}))
         self.assertFalse(record_has_gasu({"affiliation": "Tomsk State University"}))
 
@@ -191,6 +201,48 @@ class MultiAffiliationTests(unittest.TestCase):
             scopus_authid({"@auid": "57200000009"}),
             "57200000009",
         )
+
+    def test_pick_authid_prefers_unique_profile(self):
+        entries = [
+            {
+                "dc:identifier": "AUTHOR_ID:57200000001",
+                "preferred-name": {"surname": "Alekseev", "given-name": "Pavel", "initials": "P.V."},
+                "affiliation-current": {
+                    "affiliation-name": "Tomsk State University",
+                    "affiliation-city": "Tomsk",
+                },
+            }
+        ]
+        self.assertEqual(
+            pick_scopus_authid(entries, surname="Alekseev", initials="P.V."),
+            "57200000001",
+        )
+
+    def test_pick_authid_does_not_guess_two_same_initials(self):
+        entries = [
+            {
+                "dc:identifier": "AUTHOR_ID:11111111111",
+                "preferred-name": {"initials": "P.A."},
+                "affiliation-current": {"affiliation-name": "Gorno-Altaisk State University"},
+            },
+            {
+                "dc:identifier": "AUTHOR_ID:22222222222",
+                "preferred-name": {"initials": "P.V."},
+                "affiliation-current": {"affiliation-name": "Gorno-Altaisk State University"},
+            },
+        ]
+        self.assertEqual(pick_scopus_authid(entries, surname="Alekseev", initials="P."), "")
+
+    def test_match_authid_on_paper_by_surname_and_initial(self):
+        authors = [
+            {"surname": "Kyrov", "initials": "V.A.", "authid": "11111111111"},
+            {"surname": "Alekseev", "initials": "P.", "authid": "57200000001"},
+        ]
+        self.assertEqual(
+            match_authid_on_paper(authors, "Alekseev", "P.V."),
+            "57200000001",
+        )
+        self.assertEqual(match_authid_on_paper(authors, "Ivanov", "I."), "")
 
 
 if __name__ == "__main__":

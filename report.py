@@ -244,6 +244,7 @@ def _empty_author_bucket() -> dict:
         "surname": "",
         "given": "",
         "initials": "",
+        "sample_scopus_id": "",
     }
 
 
@@ -266,6 +267,7 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
         "surname": bucket.get("surname") or (parts[0] if parts else ""),
         "given": bucket.get("given") or "",
         "initials": bucket.get("initials") or (parts[1] if len(parts) > 1 else ""),
+        "sample_scopus_id": bucket.get("sample_scopus_id") or "",
         "Всего Scopus": total,
         "С ГАГУ": gasu_n,
         "Q1": bucket["Q1"],
@@ -294,6 +296,8 @@ def _merge_author_bucket(dest: dict, src: dict) -> None:
         dest["given"] = src["given"]
     if src.get("initials") and not dest.get("initials"):
         dest["initials"] = src["initials"]
+    if src.get("sample_scopus_id") and not dest.get("sample_scopus_id"):
+        dest["sample_scopus_id"] = src["sample_scopus_id"]
 
 
 def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
@@ -352,6 +356,9 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
             authid = (author.get("authid") or "").strip()
             if authid.isdigit():
                 bucket["authid"] = authid
+            sid = (rec.get("scopus_id") or "").strip()
+            if sid and not bucket.get("sample_scopus_id"):
+                bucket["sample_scopus_id"] = sid
             bucket["flags"].add(author.get("from_gasu"))
             bucket["gasu_n"] += 1
             _add_quartile(bucket, rec)
@@ -373,7 +380,7 @@ def apply_author_total(candidate: dict, total: int, account: str = "все ст�
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
-    hide = {"authid", "surname", "given", "initials"}
+    hide = {"authid", "surname", "given", "initials", "sample_scopus_id"}
     rows = [
         {k: v for k, v in row.items() if k not in hide}
         for row in candidates

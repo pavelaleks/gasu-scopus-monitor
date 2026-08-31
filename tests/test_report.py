@@ -186,6 +186,18 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["С ГАГУ"], 2)
         self.assertIn("Alekseev", rows[0]["Автор"])
 
+    def test_rsf_keeps_sample_paper_id_for_profile_lookup(self):
+        records = [
+            {
+                "scopus_id": "12345678901",
+                "authors": [{"surname": "Alekseev", "initials": "P.V."}],
+            }
+        ]
+        rows = rsf_candidates(records)
+        self.assertEqual(rows[0]["sample_scopus_id"], "12345678901")
+        shown = rsf_eligibility_rows(rows, 1)
+        self.assertNotIn("sample_scopus_id", shown[0])
+
 
 if __name__ == "__main__":
     unittest.main()

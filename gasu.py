@@ -289,18 +289,133 @@ def author_id_query(authid: str, year_start: int, year_end: int) -> str:
     return f"AU-ID({ident}) AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
 
 
-def author_name_query(
+def first_initial(initials: str = "", given: str = "") -> str:
+    for text in (initials, given):
+        for ch in text or "":
+            if ch.isalpha():
+                return ch.upper()
+    return ""
+
+
+def gasu_author_affil_clause() -> str:
+    """Author Search API понимает AFFIL, не AFFILORG."""
+    names = " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES)
+    return f"({names})"
+
+
+def author_profile_query(
     surname: str,
     initials: str = "",
     given: str = "",
-    year_start: int | None = None,
-    year_end: int | None = None,
+    *,
+    with_initial: bool | None = None,
 ) -> str:
-    """Тот же запрос, что «Поиск по автору» без ORCID: AUTH(фамилия) и годы."""
-    query = f"AUTH({quoted(surname)})"
-    if year_start is not None and year_end is not None:
-        query += f" AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
-    return query
+    """Поиск профиля автора: фамилия + ГАГУ, при возможности первая буква имени."""
+    query = f"AUTHLAST({quoted(surname)})"
+    initial = first_initial(initials, given)
+    if with_initial is None:
+        with_initial = bool(initial)
+    if with_initial and initial:
+        query += f" AND AUTHFIRST({initial})"
+    return f"{query} AND {gasu_author_affil_clause()}"
+
+
+def author_papers_query(authid: str, date_filter: dict | None, only_gasu: bool) -> str:
+    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    base = f"AU-ID({ident})"
+    if date_filter:
+        if date_filter.get("mode") == "current":
+            base = f"{base} AND PUBYEAR IS {date_filter['year']}"
+        else:
+            year_start = date_filter["year_start"]
+            year_end = date_filter["year_end"]
+            base = f"{base} AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+    if only_gasu:
+        base = f"{base} AND {gasu_affiliation_clause()}"
+    return base
+
+
+def author_search_id(entry: dict) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    ident = str(entry.get("dc:identifier") or "")
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    if len(digits) >= 6:
+        return digits
+    return scopus_authid(entry)
+
+
+def _author_entry_initial(entry: dict) -> str:
+    pref = entry.get("preferred-name")
+    if not isinstance(pref, dict):
+        pref = {}
+    return first_initial(
+        str(pref.get("initials") or entry.get("initials") or ""),
+        str(pref.get("given-name") or entry.get("given-name") or ""),
+    )
+
+
+def _author_entry_is_gasu(entry: dict) -> bool:
+    aff = entry.get("affiliation-current") or {}
+    if isinstance(aff, list):
+        aff = aff[0] if aff else {}
+    if not isinstance(aff, dict):
+        aff = {}
+    name = str(aff.get("affiliation-name") or aff.get("affilname") or "")
+    city = str(aff.get("affiliation-city") or "")
+    return is_gasu_name(name) or is_gasu_city(city)
+
+
+def pick_scopus_authid(
+    entries: list,
+    surname: str = "",
+    initials: str = "",
+    given: str = "",
+) -> str:
+    """Один профиль, если однозначен. Несколько тёзок с той же буквой — не угадываем."""
+    wanted = first_initial(initials, given).lower()
+    parsed: list[tuple[str, bool, str]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or entry.get("error"):
+            continue
+        authid = author_search_id(entry)
+        if not authid:
+            continue
+        parsed.append((authid, _author_entry_is_gasu(entry), _author_entry_initial(entry).lower()))
+    if wanted:
+        parsed = [item for item in parsed if not item[2] or item[2] == wanted]
+    unique = list(dict.fromkeys(item[0] for item in parsed))
+    if len(unique) == 1:
+        return unique[0]
+    gasu = list(dict.fromkeys(item[0] for item in parsed if item[1]))
+    if len(gasu) == 1:
+        return gasu[0]
+    return ""
+
+
+def match_authid_on_paper(
+    authors: list[dict],
+    surname: str,
+    initials: str = "",
+    given: str = "",
+) -> str:
+    """AU-ID человека на уже найденной статье ГАГУ — не по фамилии среди всех Scopus."""
+    wanted_sur = (surname or "").strip().lower()
+    if not wanted_sur:
+        return ""
+    wanted_ini = first_initial(initials, given).lower()
+    hits: list[str] = []
+    for author in authors or []:
+        if (author.get("surname") or "").strip().lower() != wanted_sur:
+            continue
+        got = first_initial(author.get("initials") or "", author.get("given") or "").lower()
+        if wanted_ini and got and got != wanted_ini:
+            continue
+        authid = (author.get("authid") or "").strip()
+        if authid.isdigit():
+            hits.append(authid)
+    unique = list(dict.fromkeys(hits))
+    return unique[0] if len(unique) == 1 else ""
 
 
 def record_has_gasu(record: dict) -> bool:

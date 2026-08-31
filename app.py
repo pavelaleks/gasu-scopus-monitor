@@ -14,13 +14,15 @@ from auth import cookie_manager, logout, require_login
 from gasu import (
     GASU_FOUNDED_YEAR,
     author_id_query,
-    author_name_query,
+    author_papers_query,
+    author_profile_query,
     build_query,
     entry_belongs_to_gasu,
+    first_initial,
     format_affiliations,
-    is_gasu_city,
-    is_gasu_name,
+    match_authid_on_paper,
     parse_authors,
+    pick_scopus_authid,
     query_targets_gasu,
 )
 from report import (
@@ -62,13 +64,14 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AUTHOR_URL = "https://api.elsevier.com/content/search/author"
+ABSTRACT_URL = "https://api.elsevier.com/content/abstract/scopus_id"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
     "prism:doi,prism:volume,prism:issueIdentifier,prism:pageRange,"
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -272,22 +275,66 @@ def fetch_scopus_total(query: str, api_key: str) -> int:
     return int((payload.get("search-results") or {}).get("opensearch:totalResults") or 0)
 
 
-def _author_id_from_entry(entry: dict) -> str:
-    ident = str(entry.get("dc:identifier") or "")
-    digits = "".join(ch for ch in ident if ch.isdigit())
-    return digits if len(digits) >= 6 else ""
-
-
-def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str) -> str:
-    if not (surname or "").strip():
-        return ""
-    query = author_name_query(surname, initials, given)
+def _author_search_entries(query: str, api_key: str) -> list[dict]:
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     try:
         response = requests.get(
             AUTHOR_URL,
             headers=headers,
             params={"query": query, "count": 15, "start": 0},
+            timeout=45,
+        )
+    except requests.RequestException:
+        return []
+    if response.status_code != 200:
+        return []
+    try:
+        payload = response.json()
+    except Exception:
+        return []
+    entries = (payload.get("search-results") or {}).get("entry") or []
+    if isinstance(entries, dict):
+        entries = [entries]
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str) -> str:
+    if not (surname or "").strip():
+        return ""
+    queries = [author_profile_query(surname, initials, given)]
+    if first_initial(initials, given):
+        queries.append(author_profile_query(surname, initials, given, with_initial=False))
+    seen: set[str] = set()
+    for query in queries:
+        if query in seen:
+            continue
+        seen.add(query)
+        picked = pick_scopus_authid(
+            _author_search_entries(query, api_key),
+            surname=surname,
+            initials=initials,
+            given=given,
+        )
+        if picked:
+            return picked
+    return ""
+
+
+def fetch_authid_from_paper(
+    scopus_id: str,
+    surname: str,
+    initials: str,
+    given: str,
+    api_key: str,
+) -> str:
+    ident = (scopus_id or "").strip()
+    if not ident:
+        return ""
+    headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
+    try:
+        response = requests.get(
+            f"{ABSTRACT_URL}/{ident}",
+            headers=headers,
             timeout=45,
         )
     except requests.RequestException:
@@ -298,36 +345,7 @@ def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str)
         payload = response.json()
     except Exception:
         return ""
-    entries = (payload.get("search-results") or {}).get("entry") or []
-    if isinstance(entries, dict):
-        entries = [entries]
-    gasu_id = ""
-    any_id = ""
-    matches = 0
-    for entry in entries:
-        if not isinstance(entry, dict) or entry.get("error"):
-            continue
-        authid = _author_id_from_entry(entry)
-        if not authid:
-            continue
-        matches += 1
-        if not any_id:
-            any_id = authid
-        aff = entry.get("affiliation-current") or {}
-        if isinstance(aff, list):
-            aff = aff[0] if aff else {}
-        if not isinstance(aff, dict):
-            aff = {}
-        name = str(aff.get("affiliation-name") or aff.get("affilname") or "")
-        city = str(aff.get("affiliation-city") or "")
-        if is_gasu_name(name) or is_gasu_city(city):
-            gasu_id = authid
-            break
-    if gasu_id:
-        return gasu_id
-    if matches == 1:
-        return any_id
-    return ""
+    return match_authid_on_paper(parse_authors(payload), surname, initials, given)
 
 
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
@@ -400,44 +418,43 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
 def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple[list[dict], int, int]:
     expanded = []
     failed = 0
-    named = 0
+    resolved = 0
+    cache: dict[str, str] = {}
     for cand in candidates:
         row = dict(cand)
+        surname = cand.get("surname") or ""
+        initials = cand.get("initials") or ""
+        given = cand.get("given") or ""
+        cache_key = f"{surname.strip().lower()}|{first_initial(initials, given).lower()}"
         authid = (cand.get("authid") or "").strip()
         if not authid:
-            authid = resolve_scopus_authid(
-                cand.get("surname") or "",
-                cand.get("initials") or "",
-                cand.get("given") or "",
+            authid = cache.get(cache_key, "")
+        if not authid:
+            authid = resolve_scopus_authid(surname, initials, given, api_key)
+            if authid:
+                resolved += 1
+        if not authid:
+            authid = fetch_authid_from_paper(
+                cand.get("sample_scopus_id") or "",
+                surname,
+                initials,
+                given,
                 api_key,
             )
             if authid:
-                row["authid"] = authid
+                resolved += 1
+        if authid:
+            cache[cache_key] = authid
+            row["authid"] = authid
         try:
             if authid:
                 query = author_id_query(authid, window.from_year, window.to_year)
                 total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total, "конкретный автор (AU-ID)")
-            else:
-                query = build_query(
-                    "Поиск по автору",
-                    cand.get("surname") or "",
-                    "",
-                    {
-                        "mode": "range",
-                        "year": window.from_year,
-                        "year_start": window.from_year,
-                        "year_end": window.to_year,
-                    },
-                    False,
-                )
-                total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total, "как поиск по автору (фамилия)")
-                named += 1
+                apply_author_total(row, total, "профиль Scopus (AU-ID)")
         except Exception:
             failed += 1
         expanded.append(row)
-    return expanded, failed, named
+    return expanded, failed, resolved
 
 
 def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
@@ -536,14 +553,17 @@ def render_report_block(
     records: list[dict],
     *,
     author_mode: bool,
-    has_orcid: bool,
+    precise_author: bool,
     university: bool,
     author_last: str = "",
     show_top_authors: bool = True,
 ) -> None:
     st.subheader("Динамика для отчёта")
-    if author_mode and not has_orcid:
-        st.warning("Поиск по фамилии без ORCID может включать однофамильцев. Для персонального отчёта лучше указать ORCID.")
+    if author_mode and not precise_author:
+        st.warning(
+            "Профиль Scopus не сопоставился однозначно: показаны работы по фамилии. "
+            "Возможны однофамильцы. Для персонального отчёта укажите ORCID."
+        )
     st.write(report_sentence(report))
     if report.counts:
         png = report_chart_png(report)
@@ -816,7 +836,22 @@ if search_clicked:
     if mode == "Поиск по автору" and not author_orcid and not author_last:
         st.error("Для поиска по автору укажите фамилию или ORCID.")
         st.stop()
-    query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
+    identity = "university"
+    if mode == "Поиск по автору":
+        if author_orcid:
+            identity = "orcid"
+            query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
+        else:
+            with st.spinner("Ищем профиль автора в Scopus..."):
+                authid = resolve_scopus_authid(author_last, "", "", api_key)
+            if authid:
+                identity = "au-id"
+                query = author_papers_query(authid, date_filter, only_gasu)
+            else:
+                identity = "surname"
+                query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
+    else:
+        query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
     with st.spinner("Идет поиск в Scopus..."):
         try:
             records = fetch_scopus_data(query, api_key, None)
@@ -861,6 +896,7 @@ if search_clicked:
     st.session_state["author_last"] = author_last
     st.session_state["author_orcid"] = author_orcid
     st.session_state["only_gasu"] = only_gasu
+    st.session_state["author_identity"] = identity
     st.session_state["show_report"] = False
     st.session_state.pop("dynamics_records", None)
     if grant_min:
@@ -911,18 +947,21 @@ if "records" in st.session_state and st.session_state["records"]:
         with_id = int(st.session_state.get("grant_with_id") or 0)
         people = int(st.session_state.get("grant_people") or 0)
         named = int(st.session_state.get("grant_named") or 0)
-        counted = with_id + named
+        counted = with_id
         if people and counted == 0:
-            st.warning("Не удалось посчитать полный Scopus ни у одного автора. Показаны только статьи с ГАГУ.")
+            st.warning(
+                "Не удалось сопоставить профили Scopus. Показаны только статьи с ГАГУ, "
+                "без подмешивания однофамильцев."
+            )
         st.caption(
-            "Порог считается так же, как «Поиск по автору»: AUTH(фамилия) за окно лет, "
-            "без фильтра ГАГУ. ORCID нет — возможны однофамильцы, как в том режиме. "
-            "Если Scopus дал Author ID, берётся конкретный человек (AU-ID). "
-            "Связь с вузом: есть хотя бы одна статья ГАГУ. Смотрите «С ГАГУ» у совместителей. "
+            "Порог — статьи профиля Scopus (AU-ID) за окно лет, с любой аффилиацией. "
+            "«Alekseev P.» и «Alekseev P.V.» в одном профиле — один человек. "
+            "В список попадает автор, у которого в окне есть хотя бы одна статья ГАГУ. "
+            "Если профиль не найден, остаётся только счётчик статей с ГАГУ. "
             "Это оценка для мониторинга, не экспертиза заявки."
             + (
-                f" Полный список посчитан у {counted} из {people} авторов"
-                + (f" ({named} запросом как поиск по автору)." if named else ".")
+                f" Профиль найден у {counted} из {people} авторов"
+                + (f" ({named} через поиск профиля или карточку статьи)." if named else ".")
                 if people
                 else ""
             )
@@ -993,7 +1032,7 @@ if "records" in st.session_state and st.session_state["records"]:
                 build_report(report_source),
                 report_source,
                 author_mode=(st.session_state.get("search_mode") == "Поиск по автору"),
-                has_orcid=bool(st.session_state.get("author_orcid")),
+                precise_author=st.session_state.get("author_identity") in {"orcid", "au-id"},
                 university=(st.session_state.get("search_mode") != "Поиск по автору"),
                 author_last=st.session_state.get("author_last") or "",
                 show_top_authors=not grant_min_saved,

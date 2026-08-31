@@ -11,6 +11,8 @@ Scopus индексирует все аффилиации документа, п
 
 from __future__ import annotations
 
+import re
+
 # Исторический id из первой версии приложения. Не используем в запросе:
 # по нему Scopus отдавал чужие организации, а код ещё и подписывал их как ГАГУ.
 AFFILIATION_ID = "60105869"
@@ -324,6 +326,11 @@ def gasu_author_affil_clause() -> str:
     return "(" + " OR ".join(f"AFFIL({quoted(name)})" for name in names) + ")"
 
 
+def gasu_author_roster_query() -> str:
+    """Все профили с текущей аффилиацией ГАГУ: полные имена вуза, без AF-ID и без GASU."""
+    return "(" + " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES) + ")"
+
+
 def author_profile_query(
     surname: str,
     initials: str = "",
@@ -516,6 +523,10 @@ def _author_entry_is_gasu(entry: dict) -> bool:
     name = str(aff.get("affiliation-name") or aff.get("affilname") or "")
     city = str(aff.get("affiliation-city") or "")
     return is_gasu_name(name) or is_gasu_city(city)
+
+
+def author_search_entry_is_gasu(entry: dict) -> bool:
+    return _author_entry_is_gasu(entry)
 
 
 def pick_scopus_authid(
@@ -725,6 +736,57 @@ def needs_author_enrichment(record: dict) -> bool:
     return len(author_ids(authors)) < len(authors)
 
 
+def truncated_author_paper_count(records: list[dict]) -> int:
+    return sum(1 for rec in records or [] if len(rec.get("authors") or []) < 2)
+
+
+_AUTHOR_TEXT_TOKEN = re.compile(
+    r"([A-Za-zА-ЯЁа-яё][A-Za-zА-ЯЁа-яё''-]*)"
+    r"(?:\s*,\s*|\s+)"
+    r"([A-ZА-ЯЁ](?:\.[A-Za-zА-ЯЁ]+)*\.?)"
+)
+
+
+def parse_author_text(text: str) -> list[dict]:
+    """Строка вроде «Frolov, I.N., Kudryavtsev, N.G., Safonova, V.Yu.»."""
+    authors: list[dict] = []
+    seen: set[str] = set()
+    for match in _AUTHOR_TEXT_TOKEN.finditer(text or ""):
+        surname = match.group(1).strip()
+        initials = match.group(2).strip()
+        if not initials.endswith("."):
+            initials = f"{initials}."
+        key = surname.lower()
+        if not surname or key in seen:
+            continue
+        seen.add(key)
+        authors.append(
+            {
+                "surname": surname,
+                "given": "",
+                "initials": initials,
+                "from_gasu": None,
+                "authid": "",
+            }
+        )
+    return authors
+
+
+def _author_text_blobs(entry: dict) -> list[str]:
+    blobs: list[str] = []
+    if not isinstance(entry, dict):
+        return blobs
+    for key in ("author", "authors", "dc:creator"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            blobs.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    blobs.append(item)
+    return blobs
+
+
 def parse_authors(entry: dict) -> list[dict]:
     authors = []
     seen: set[str] = set()
@@ -737,6 +799,14 @@ def parse_authors(entry: dict) -> list[dict]:
             continue
         seen.add(key)
         authors.append(parsed)
+    have = {(item.get("surname") or "").strip().lower() for item in authors if item.get("surname")}
+    for blob in _author_text_blobs(entry):
+        for extra in parse_author_text(blob):
+            surname = (extra.get("surname") or "").strip().lower()
+            if not surname or surname in have:
+                continue
+            have.add(surname)
+            authors.append(extra)
     if authors:
         return authors
     creator = (entry.get("dc:creator") or "").strip()

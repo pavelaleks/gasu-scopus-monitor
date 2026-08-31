@@ -19,11 +19,13 @@ from gasu import (
     author_ids,
     author_papers_query,
     author_profile_query,
+    author_search_entry_is_gasu,
     author_search_id,
     build_query,
     entry_belongs_to_gasu,
     first_initial,
     format_affiliations,
+    gasu_author_roster_query,
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
@@ -34,6 +36,7 @@ from gasu import (
     profile_display_name,
     query_targets_gasu,
     quoted,
+    truncated_author_paper_count,
 )
 from report import (
     ReportData,
@@ -82,7 +85,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.10"
+APP_VERSION = "1.8.11"
 APP_UPDATED_FALLBACK = "29.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_AUTHOR = "Поиск по автору"
@@ -324,6 +327,106 @@ def _author_search_entries(query: str, api_key: str) -> list[dict]:
     if isinstance(entries, dict):
         entries = [entries]
     return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _author_search_pages(query: str, api_key: str, *, page_size: int = 25, limit: int = 200) -> list[dict]:
+    headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
+    start = 0
+    total = None
+    entries: list[dict] = []
+    while start < limit:
+        try:
+            response = requests.get(
+                AUTHOR_URL,
+                headers=headers,
+                params={"query": query, "count": page_size, "start": start},
+                timeout=45,
+            )
+        except requests.RequestException:
+            break
+        if response.status_code != 200:
+            break
+        try:
+            payload = response.json()
+        except Exception:
+            break
+        search_results = payload.get("search-results") or {}
+        if total is None:
+            total = int(search_results.get("opensearch:totalResults") or 0)
+        page = search_results.get("entry") or []
+        if isinstance(page, dict):
+            page = [page]
+        batch = [entry for entry in page if isinstance(entry, dict) and not entry.get("error")]
+        if not batch:
+            break
+        entries.extend(batch)
+        start += page_size
+        if total is not None and start >= total:
+            break
+    return entries
+
+
+def fetch_gasu_scopus_profiles(api_key: str) -> list[dict]:
+    """Профили Author Search с текущей аффилиацией ГАГУ — не срез статей."""
+    profiles: list[dict] = []
+    seen: set[str] = set()
+    for entry in _author_search_pages(gasu_author_roster_query(), api_key):
+        if not author_search_entry_is_gasu(entry):
+            continue
+        profile = parse_author_search_profile(entry)
+        authid = (profile.get("authid") or "").strip()
+        if not authid or authid in seen:
+            continue
+        seen.add(authid)
+        profiles.append(profile)
+    if not profiles:
+        return []
+    metrics: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(fetch_author_metrics, profile["authid"], api_key): profile["authid"]
+            for profile in profiles
+        }
+        for fut in as_completed(futures):
+            authid = futures[fut]
+            try:
+                extra = fut.result() or {}
+            except Exception:
+                extra = {}
+            if extra:
+                metrics[authid] = extra
+    for profile in profiles:
+        extra = metrics.get((profile.get("authid") or "").strip())
+        if extra:
+            apply_author_profile(profile, extra)
+    profiles.sort(
+        key=lambda item: (
+            -(item.get("documents") or -1),
+            -(item.get("h_index") or -1),
+            profile_display_name(item).lower(),
+        )
+    )
+    return profiles
+
+
+def gasu_profile_rows(profiles: list[dict]) -> list[dict]:
+    rows = []
+    for profile in profiles:
+        citations = profile.get("citations")
+        if citations is None:
+            citations = profile.get("cited_by")
+        rows.append(
+            {
+                "Автор": profile_display_name(profile),
+                "Author ID": profile.get("authid") or "",
+                "ORCID": profile.get("orcid") or "",
+                "h-индекс": "" if profile.get("h_index") is None else profile.get("h_index"),
+                "Документы": "" if profile.get("documents") is None else profile.get("documents"),
+                "Цитирования": "" if citations is None else citations,
+                "Аффилиация": profile.get("profile_affil") or "",
+            }
+        )
+    return rows
 
 
 def resolve_author_profile(
@@ -704,6 +807,7 @@ def build_xlsx(
     university: bool = False,
     grant_rows: list[dict] | None = None,
     profile: dict | None = None,
+    gasu_profiles: list[dict] | None = None,
 ) -> BytesIO:
     df = records_to_dataframe(records)
     df["ГОСТ 7.0.5"] = [format_gost(r) for r in records]
@@ -740,6 +844,10 @@ def build_xlsx(
             authors = top_authors(source, 20)
             if authors:
                 pd.DataFrame(authors).to_excel(writer, index=False, sheet_name="Авторы")
+        if gasu_profiles:
+            pd.DataFrame(gasu_profile_rows(gasu_profiles)).to_excel(
+                writer, index=False, sheet_name="Профили ГАГУ"
+            )
         if grant_rows:
             pd.DataFrame(grant_rows).to_excel(writer, index=False, sheet_name="РНФ")
         if report.top_journals:
@@ -948,6 +1056,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_named",
         "target_profile",
         "author_identity",
+        "gasu_profiles",
     ):
         st.session_state.pop(key, None)
 
@@ -1008,7 +1117,10 @@ only_gasu = False
 if mode == MODE_UNIVERSITY:
     st.caption(
         "Мониторинг ГАГУ включает статьи, где университет указан хотя бы как одна из "
-        "аффилиаций (в том числе вместе с другими организациями)."
+        "аффилиаций (в том числе вместе с другими организациями). "
+        "Соавторы считаются наравне с первым автором. Если Scopus отдал только первого — "
+        "остальные (например Сафонова) пропадут из списка и статистики. "
+        "«8 documents» на странице автора — вся карьера; полный список её работ — режим «Поиск по автору»."
     )
     quick1, quick2, quick3 = st.columns(3)
     with quick1:
@@ -1309,6 +1421,35 @@ if "records" in st.session_state and st.session_state["records"]:
             "В список входят только записи, где в ответе Scopus видно ГАГУ по названию или городу "
             "(в том числе как одна из нескольких аффилиаций)."
         )
+        truncated = truncated_author_paper_count(records)
+        if truncated:
+            st.warning(
+                f"У {truncated} из {len(records)} статей Scopus отдал только одного автора "
+                "(обычно первого). Соавторы не попадут в список литературы, "
+                "в «наиболее активные авторы» и в РНФ. "
+                "Показатели вроде «8 documents / h-index 1» — весь профиль Scopus, "
+                "а не число работ ГАГУ в этом срезе. Полный список человека — «Поиск по автору»."
+            )
+        if st.button("Авторы ГАГУ в Scopus (профили, h-индекс)", key="load_gasu_profiles"):
+            if not api_key:
+                st.error("Нужен API-ключ Scopus.")
+            else:
+                with st.spinner("Загружаем профили Author Search с аффилиацией ГАГУ..."):
+                    st.session_state["gasu_profiles"] = fetch_gasu_scopus_profiles(api_key)
+                st.rerun()
+        roster = st.session_state.get("gasu_profiles") or []
+        if roster:
+            st.subheader("Авторы с аффилиацией ГАГУ в Scopus")
+            st.caption(
+                "Как на странице автора: h-индекс, документы и цитирования за всю карьеру. "
+                "Это не число статей в списке ниже и не окно РНФ. "
+                "Здесь есть люди, которые в выдаче статей стоят не первыми."
+            )
+            st.dataframe(
+                pd.DataFrame(gasu_profile_rows(roster)),
+                hide_index=True,
+                use_container_width=True,
+            )
 
     active_filter = st.session_state.get("date_filter") or {}
     filter_span = 1
@@ -1389,6 +1530,11 @@ if "records" in st.session_state and st.session_state["records"]:
         for rec in records_for_list
     ]
     st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
+    if saved_mode == MODE_UNIVERSITY and truncated_author_paper_count(records_for_list):
+        st.caption(
+            "В ГОСТ/APA выводятся те авторы, которых Scopus вернул по статье. "
+            "Если в записи один человек — соавторы в этой строке не скрыты форматом, их нет в ответе API."
+        )
 
     docx_buffer = build_docx(records_for_list, format_choice)
     xlsx_buffer = build_xlsx(
@@ -1397,6 +1543,7 @@ if "records" in st.session_state and st.session_state["records"]:
         university=(saved_mode == MODE_UNIVERSITY),
         grant_rows=grant_rows if grant_min_saved else None,
         profile=profile if saved_mode == MODE_AUTHOR else None,
+        gasu_profiles=st.session_state.get("gasu_profiles") if saved_mode == MODE_UNIVERSITY else None,
     )
 
     col1, col2 = st.columns(2)

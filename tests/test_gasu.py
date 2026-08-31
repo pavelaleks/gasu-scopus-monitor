@@ -20,11 +20,14 @@ from gasu import (
     orcid_id_query,
     parse_author_retrieval,
     parse_author_search_profile,
+    parse_author_text,
     parse_authors,
     pick_scopus_authid,
     profile_display_name,
     record_has_gasu,
     scopus_authid,
+    truncated_author_paper_count,
+    gasu_author_roster_query,
 )
 
 
@@ -36,6 +39,14 @@ class GasuQueryTests(unittest.TestCase):
         self.assertIn("Gorno-Altai State University", clause)
         self.assertNotIn('AFFIL("GASU")', clause)
         self.assertNotIn(f"AF-ID({AFFILIATION_ID})", clause)
+
+    def test_author_roster_query_uses_full_university_names(self):
+        query = gasu_author_roster_query()
+        self.assertIn('AFFIL("Gorno-Altaisk State University")', query)
+        self.assertNotIn("AFFILORG(", query)
+        self.assertNotIn('AFFIL("GASU")', query)
+        self.assertNotIn(f"AF-ID({AFFILIATION_ID})", query)
+        self.assertNotIn('AFFIL("Altai State University")', query)
 
     def test_monitoring_query_is_name_based(self):
         query = build_query(
@@ -373,6 +384,28 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertEqual(profile_display_name(retrieval), "Safonova, Varvara Yu")
         self.assertIn("Gorno-Altaisk", retrieval["profile_affil"])
         self.assertIn("Russian Federation", retrieval["profile_affil"])
+
+    def test_parse_author_text_keeps_coauthors_not_only_first(self):
+        names = [item["surname"] for item in parse_author_text(
+            "Frolov, I.N., Kudryavtsev, N.G., Safonova, V.Yu."
+        )]
+        self.assertEqual(names, ["Frolov", "Kudryavtsev", "Safonova"])
+        parsed = parse_authors(
+            {
+                "dc:creator": "Frolov, I.N.",
+                "author": "Frolov, I.N., Kudryavtsev, N.G., Safonova, V.Yu.",
+            }
+        )
+        self.assertEqual([item["surname"] for item in parsed], ["Frolov", "Kudryavtsev", "Safonova"])
+        self.assertEqual(
+            truncated_author_paper_count(
+                [
+                    {"authors": parsed},
+                    {"authors": [{"surname": "Frolov"}]},
+                ]
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":

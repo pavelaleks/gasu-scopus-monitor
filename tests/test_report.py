@@ -174,6 +174,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(candidates[0]["Учёт"], "все статьи автора")
         rows = rsf_eligibility_rows(candidates, 8)
         self.assertEqual([row["Автор"] for row in rows], ["Alekseev P.V."])
+        self.assertEqual(rows[0]["Author ID"], "57200000000")
         self.assertNotIn("authid", rows[0])
 
     def test_rsf_merges_alekseev_p_and_pv(self):
@@ -197,6 +198,28 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["sample_scopus_id"], "12345678901")
         shown = rsf_eligibility_rows(rows, 1)
         self.assertNotIn("sample_scopus_id", shown[0])
+        self.assertIn("Author ID", shown[0])
+
+    def test_rsf_counts_same_alekseev_papers_as_bibliography(self):
+        records = [
+            {
+                "scopus_id": str(i),
+                "authors": [
+                    {"surname": "Kyrov", "initials": "V.A.", "authid": "11111111111"},
+                    {
+                        "surname": "Alekseev",
+                        "initials": "P.V." if i % 2 else "P.",
+                        "authid": "57200000001",
+                    },
+                ],
+            }
+            for i in range(8)
+        ]
+        rows = rsf_eligibility_rows(rsf_candidates(records), 8)
+        by_name = {row["Автор"]: row for row in rows}
+        self.assertEqual(by_name["Alekseev P.V."]["С ГАГУ"], 8)
+        self.assertEqual(by_name["Alekseev P.V."]["Author ID"], "57200000001")
+        self.assertEqual(by_name["Kyrov V.A."]["С ГАГУ"], 8)
 
 
 if __name__ == "__main__":

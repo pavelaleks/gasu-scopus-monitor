@@ -380,14 +380,30 @@ def apply_author_total(candidate: dict, total: int, account: str = "все ст�
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
-    hide = {"authid", "surname", "given", "initials", "sample_scopus_id"}
-    rows = [
-        {k: v for k, v in row.items() if k not in hide}
-        for row in candidates
-        if int(row.get("Всего Scopus") or 0) >= min_papers
-        and not rsf_name_excluded(str(row.get("Автор") or ""))
-    ]
-    rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
+    hide = {"surname", "given", "initials", "sample_scopus_id"}
+    order = (
+        "Автор",
+        "Author ID",
+        "Всего Scopus",
+        "С ГАГУ",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "Без квартиля",
+        "Учёт",
+    )
+    rows = []
+    for row in candidates:
+        if int(row.get("Всего Scopus") or 0) < min_papers:
+            continue
+        if rsf_name_excluded(str(row.get("Автор") or "")):
+            continue
+        display = {k: v for k, v in row.items() if k not in hide}
+        authid = display.pop("authid", "") or ""
+        display["Author ID"] = authid
+        rows.append({key: display.get(key, "") for key in order})
+    rows.sort(key=lambda row: (-int(row["Всего Scopus"] or 0), -int(row["С ГАГУ"] or 0), str(row["Автор"]).lower()))
     return rows
 
 

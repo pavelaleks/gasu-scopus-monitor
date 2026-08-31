@@ -552,6 +552,27 @@ def parse_author_item(item: dict) -> dict | None:
     }
 
 
+def author_ids(authors: list[dict] | None) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for author in authors or []:
+        authid = str((author or {}).get("authid") or "").strip()
+        if authid.isdigit() and authid not in seen:
+            seen.add(authid)
+            ids.append(authid)
+    return ids
+
+
+def needs_author_enrichment(record: dict) -> bool:
+    """Search API часто отдаёт только первого автора и без Author ID."""
+    if not (record.get("scopus_id") or "").strip():
+        return False
+    authors = record.get("authors") or []
+    if len(authors) < 2:
+        return True
+    return len(author_ids(authors)) < len(authors)
+
+
 def parse_authors(entry: dict) -> list[dict]:
     authors = []
     seen: set[str] = set()

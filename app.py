@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -13,6 +14,7 @@ from docx import Document
 from auth import cookie_manager, logout, require_login
 from gasu import (
     GASU_FOUNDED_YEAR,
+    author_ids,
     author_id_query,
     author_papers_query,
     author_profile_query,
@@ -20,7 +22,7 @@ from gasu import (
     entry_belongs_to_gasu,
     first_initial,
     format_affiliations,
-    match_authid_on_paper,
+    needs_author_enrichment,
     parse_authors,
     pick_scopus_authid,
     query_targets_gasu,
@@ -71,7 +73,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -320,32 +322,51 @@ def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str)
     return ""
 
 
-def fetch_authid_from_paper(
-    scopus_id: str,
-    surname: str,
-    initials: str,
-    given: str,
-    api_key: str,
-) -> str:
+def fetch_paper_authors(scopus_id: str, api_key: str) -> list[dict]:
     ident = (scopus_id or "").strip()
     if not ident:
-        return ""
+        return []
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
-    try:
-        response = requests.get(
-            f"{ABSTRACT_URL}/{ident}",
-            headers=headers,
-            timeout=45,
-        )
-    except requests.RequestException:
-        return ""
-    if response.status_code != 200:
-        return ""
-    try:
-        payload = response.json()
-    except Exception:
-        return ""
-    return match_authid_on_paper(parse_authors(payload), surname, initials, given)
+    url = f"{ABSTRACT_URL}/{ident}"
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=45)
+        except requests.RequestException:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        if response.status_code == 429:
+            time.sleep(2 * (attempt + 1))
+            continue
+        if response.status_code != 200:
+            return []
+        try:
+            return parse_authors(response.json())
+        except Exception:
+            return []
+    return []
+
+
+def enrich_record_authors(records: list[dict], api_key: str) -> int:
+    """По Scopus ID статьи добираем полный список авторов и их Author ID."""
+    todo = [rec for rec in records if needs_author_enrichment(rec)]
+    if not todo:
+        return 0
+    updated = 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(fetch_paper_authors, rec.get("scopus_id") or "", api_key): rec
+            for rec in todo
+        }
+        for fut in as_completed(futures):
+            rec = futures[fut]
+            try:
+                authors = fut.result()
+            except Exception:
+                continue
+            if authors:
+                rec["authors"] = authors
+                updated += 1
+    return updated
 
 
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
@@ -418,43 +439,24 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
 def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple[list[dict], int, int]:
     expanded = []
     failed = 0
-    resolved = 0
-    cache: dict[str, str] = {}
+    counted = 0
+    totals: dict[str, int] = {}
     for cand in candidates:
         row = dict(cand)
-        surname = cand.get("surname") or ""
-        initials = cand.get("initials") or ""
-        given = cand.get("given") or ""
-        cache_key = f"{surname.strip().lower()}|{first_initial(initials, given).lower()}"
         authid = (cand.get("authid") or "").strip()
         if not authid:
-            authid = cache.get(cache_key, "")
-        if not authid:
-            authid = resolve_scopus_authid(surname, initials, given, api_key)
-            if authid:
-                resolved += 1
-        if not authid:
-            authid = fetch_authid_from_paper(
-                cand.get("sample_scopus_id") or "",
-                surname,
-                initials,
-                given,
-                api_key,
-            )
-            if authid:
-                resolved += 1
-        if authid:
-            cache[cache_key] = authid
-            row["authid"] = authid
+            expanded.append(row)
+            continue
         try:
-            if authid:
+            if authid not in totals:
                 query = author_id_query(authid, window.from_year, window.to_year)
-                total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total, "профиль Scopus (AU-ID)")
+                totals[authid] = fetch_scopus_total(query, api_key)
+            apply_author_total(row, totals[authid], "профиль Scopus (AU-ID)")
+            counted += 1
         except Exception:
             failed += 1
         expanded.append(row)
-    return expanded, failed, resolved
+    return expanded, failed, counted
 
 
 def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
@@ -466,13 +468,14 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Название": rec["title"],
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
+                "Author ID": "; ".join(author_ids(rec.get("authors"))),
                 "Организации": rec.get("affiliation", ""),
                 "Область знаний": rec.get("subject_areas") or "",
                 "Квартиль SCImago": format_quartile_cell(rec),
                 "SJR": rec.get("scimago_sjr") if rec.get("scimago_sjr") != "" else "",
                 "Год SJR": rec.get("scimago_year") or "",
                 "DOI": rec["doi"],
-                "Scopus ID": rec["scopus_id"],
+                "Scopus ID статьи": rec["scopus_id"],
             }
         )
     df = pd.DataFrame(rows)
@@ -888,6 +891,9 @@ if search_clicked:
         st.info("Статей по данному запросу не найдено.")
         st.stop()
 
+    with st.spinner("Дополняем авторов и Author ID по Scopus ID статей..."):
+        enrich_record_authors(records, api_key)
+
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
     st.session_state["query"] = query
@@ -904,12 +910,16 @@ if search_clicked:
         st.session_state["grant_contest_year"] = window.contest_year
         st.session_state["grant_from_year"] = window.from_year
         candidates = rsf_candidates(records)
-        with st.spinner("Считаем все статьи Scopus каждого автора за окно РНФ..."):
-            expanded, failed, named = expand_rsf_candidates(candidates, window, api_key)
+        st.session_state["grant_rows"] = rsf_eligibility_rows(candidates, grant_min)
+        st.session_state["grant_people"] = len(candidates)
+        st.session_state["grant_with_id"] = sum(1 for cand in candidates if cand.get("authid"))
+        st.session_state["grant_failed"] = 0
+        st.session_state["grant_named"] = 0
+        with st.spinner("Считаем все статьи Scopus по Author ID..."):
+            expanded, failed, counted = expand_rsf_candidates(candidates, window, api_key)
         st.session_state["grant_rows"] = rsf_eligibility_rows(expanded, grant_min)
         st.session_state["grant_failed"] = failed
-        st.session_state["grant_named"] = named
-        st.session_state["grant_people"] = len(candidates)
+        st.session_state["grant_named"] = counted
         st.session_state["grant_with_id"] = sum(1 for cand in expanded if cand.get("authid"))
     else:
         st.session_state.pop("grant_min", None)
@@ -950,18 +960,17 @@ if "records" in st.session_state and st.session_state["records"]:
         counted = with_id
         if people and counted == 0:
             st.warning(
-                "Не удалось сопоставить профили Scopus. Показаны только статьи с ГАГУ, "
-                "без подмешивания однофамильцев."
+                "У авторов в этом срезе нет Author ID, поэтому полный Scopus не уточнялся. "
+                "Порог посчитан по тем же статьям ГАГУ, что в списке ниже."
             )
         st.caption(
-            "Порог — статьи профиля Scopus (AU-ID) за окно лет, с любой аффилиацией. "
-            "«Alekseev P.» и «Alekseev P.V.» в одном профиле — один человек. "
-            "В список попадает автор, у которого в окне есть хотя бы одна статья ГАГУ. "
-            "Если профиль не найден, остаётся только счётчик статей с ГАГУ. "
+            "Счёт РНФ — по тем же статьям, что список литературы ниже. "
+            "Author ID берётся из карточки статьи (Scopus ID). "
+            "«Всего Scopus» затем уточняется запросом AU-ID: все работы профиля, не только ГАГУ. "
+            "P. и P.V. с одним Author ID — один человек. "
             "Это оценка для мониторинга, не экспертиза заявки."
             + (
-                f" Профиль найден у {counted} из {people} авторов"
-                + (f" ({named} через поиск профиля или карточку статьи)." if named else ".")
+                f" Author ID есть у {counted} из {people} авторов."
                 if people
                 else ""
             )
@@ -1035,7 +1044,7 @@ if "records" in st.session_state and st.session_state["records"]:
                 precise_author=st.session_state.get("author_identity") in {"orcid", "au-id"},
                 university=(st.session_state.get("search_mode") != "Поиск по автору"),
                 author_last=st.session_state.get("author_last") or "",
-                show_top_authors=not grant_min_saved,
+                show_top_authors=True,
             )
         else:
             st.info("За этот период публикаций не найдено.")
@@ -1043,6 +1052,7 @@ if "records" in st.session_state and st.session_state["records"]:
     df = records_to_dataframe(records)
     st.dataframe(df, use_container_width=True)
     st.caption(
+        "Scopus ID статьи — документ. Author ID — профиль автора в Scopus; по нему считается полный список работ. "
         "Квартиль — лучший квартиль журнала в SCImago. Если у статьи год новее рейтинга, в скобках указан год SJR "
         f"(сейчас до {load_meta().get('max_year') or '—'}). Это не оценка текста статьи."
     )

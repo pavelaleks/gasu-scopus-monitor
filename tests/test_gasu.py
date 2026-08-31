@@ -6,6 +6,7 @@ from gasu import (
     GASU_PREFERRED_NAME,
     author_belongs_to_gasu,
     author_id_query,
+    author_ids,
     author_papers_query,
     author_profile_query,
     build_query,
@@ -14,6 +15,7 @@ from gasu import (
     gasu_affiliation_clause,
     has_gasu_affiliation,
     match_authid_on_paper,
+    needs_author_enrichment,
     parse_authors,
     pick_scopus_authid,
     record_has_gasu,
@@ -243,6 +245,46 @@ class MultiAffiliationTests(unittest.TestCase):
             "57200000001",
         )
         self.assertEqual(match_authid_on_paper(authors, "Ivanov", "I."), "")
+
+    def test_needs_author_enrichment_when_list_is_truncated(self):
+        self.assertFalse(needs_author_enrichment({"authors": [{"authid": "1"}]}))
+        self.assertTrue(
+            needs_author_enrichment(
+                {"scopus_id": "851", "authors": [{"surname": "Alekseev", "authid": "57200000001"}]}
+            )
+        )
+        self.assertTrue(
+            needs_author_enrichment(
+                {
+                    "scopus_id": "851",
+                    "authors": [
+                        {"surname": "Alekseev", "authid": ""},
+                        {"surname": "Kyrov", "authid": "11111111111"},
+                    ],
+                }
+            )
+        )
+        self.assertFalse(
+            needs_author_enrichment(
+                {
+                    "scopus_id": "851",
+                    "authors": [
+                        {"surname": "Alekseev", "authid": "57200000001"},
+                        {"surname": "Kyrov", "authid": "11111111111"},
+                    ],
+                }
+            )
+        )
+        self.assertEqual(
+            author_ids(
+                [
+                    {"authid": "57200000001"},
+                    {"authid": "57200000001"},
+                    {"authid": "11111111111"},
+                ]
+            ),
+            ["57200000001", "11111111111"],
+        )
 
 
 if __name__ == "__main__":

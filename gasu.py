@@ -1,39 +1,53 @@
 """Идентификация аффилиации ГАГУ в запросах и ответах Scopus.
 
-Поиск опирается на AF-ID: Scopus считает документ принадлежащим организации,
-если ГАГУ указан хотя бы у одного автора, в том числе среди нескольких
-аффилиаций. Клиент не должен отбрасывать такие записи по урезанному полю
-affiliation в Search API.
+Точность важнее полноты: короткий AFFIL("GASU") и непроверенный AF-ID
+подмешивали сотни чужих статей (Innopolis, МФТИ и т.д.).
+
+Документ относится к ГАГУ, только если в ответе есть узнаваемое название
+или город Горно-Алтайска — не потому что совпал какой-то affiliation id.
+Scopus индексирует все аффилиации документа, поэтому AFFILORG по полному
+имени находит и случаи «ГАГУ — одна из нескольких организаций».
 """
 
 from __future__ import annotations
 
+# Исторический id из первой версии приложения. Не используем в запросе:
+# по нему Scopus отдавал чужие организации, а код ещё и подписывал их как ГАГУ.
 AFFILIATION_ID = "60105869"
 GASU_PREFERRED_NAME = "Gorno-Altaisk State University"
 AFFILIATION_NAMES = [
     "Gorno-Altaisk State University",
-    "GORNO ALTAISK STATE UNIV",
-    "GORNO-ALTAYSK  STATE UNIV",
-    "GORNO-ALTAY STATE UNIV",
-    "Gorno Alta State Univ",
     "Gorno-Altaysk State University",
-    "Gorno Altay State Univ",
+    "Gorno-Altaisk State Univ",
+    "Gorno-Altaysk State Univ",
+    "GORNO ALTAISK STATE UNIV",
+    "GORNO-ALTAYSK STATE UNIV",
+    "Горно-Алтайский государственный университет",
 ]
 AFFILIATION_NAME_SET = {" ".join(name.strip().lower().split()) for name in AFFILIATION_NAMES} | {
     "gasu",
 }
 GASU_NAME_MARKERS = (
-    "gorno-altaisk",
-    "gorno altaisk",
+    "gorno-altaisk state",
+    "gorno altaisk state",
+    "gorno-altaysk state",
+    "gorno altaysk state",
+    "gorno-altay state univ",
+    "gorno altay state univ",
+    "gorno alta state univ",
+    "горно-алтайский государственный университет",
+    "горно алтайский государственный университет",
+    "горно-алтайск. гос",
+)
+GASU_CITY_MARKERS = (
     "gorno-altaysk",
+    "gorno-altaisk",
     "gorno altaysk",
-    "gorno-altay state",
-    "gorno altay state",
-    "gorno alta state",
+    "gorno altaisk",
     "горно-алтайск",
     "горно алтайск",
-    "горно-алтайский государственный",
 )
+UNIVERSITY_TOKENS = ("univ", "university", "университет", "госуниверситет")
 
 
 def quoted(value: str) -> str:
@@ -42,17 +56,14 @@ def quoted(value: str) -> str:
 
 
 def gasu_affiliation_clause() -> str:
-    """Документы, где ГАГУ есть хотя бы как одна из аффилиаций.
-
-    Короткий акроним AFFIL("GASU") не используем: Scopus ищет его в названии,
-    вариантах и городе и подмешивает чужие организации.
-    """
-    names = " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES)
-    return f"(AF-ID({AFFILIATION_ID}) OR {names})"
+    """Только узнаваемые имена вуза, без акронима GASU и без AF-ID."""
+    names = " OR ".join(f"AFFILORG({quoted(name)})" for name in AFFILIATION_NAMES)
+    return f"({names})"
 
 
 def query_targets_gasu(query: str) -> bool:
-    return f"AF-ID({AFFILIATION_ID})" in (query or "")
+    text = query or ""
+    return "AFFILORG(" in text or "Gorno-Altaisk" in text or "Горно-Алтайск" in text
 
 
 def build_query(
@@ -105,13 +116,39 @@ def is_gasu_name(name: str) -> bool:
     return any(marker in norm for marker in GASU_NAME_MARKERS)
 
 
+def is_gasu_city(city: str) -> bool:
+    norm = normalize_affiliation_name(city)
+    if not norm:
+        return False
+    return any(marker in norm for marker in GASU_CITY_MARKERS)
+
+
+def looks_like_university(name: str) -> bool:
+    norm = normalize_affiliation_name(name)
+    return any(token in norm for token in UNIVERSITY_TOKENS)
+
+
 def affiliation_items(entry: dict) -> list[dict]:
+    items: list[dict] = []
     affil = entry.get("affiliation")
     if isinstance(affil, list):
-        return [item for item in affil if isinstance(item, dict)]
-    if isinstance(affil, dict):
-        return [affil]
-    return []
+        items.extend(item for item in affil if isinstance(item, dict))
+    elif isinstance(affil, dict):
+        items.append(affil)
+
+    authors = entry.get("author")
+    if isinstance(authors, dict):
+        authors = [authors]
+    if isinstance(authors, list):
+        for author in authors:
+            if not isinstance(author, dict):
+                continue
+            author_aff = author.get("affiliation")
+            if isinstance(author_aff, list):
+                items.extend(item for item in author_aff if isinstance(item, dict))
+            elif isinstance(author_aff, dict):
+                items.append(author_aff)
+    return items
 
 
 def afids_from_value(value: object) -> set[str]:
@@ -177,16 +214,25 @@ def affiliation_names(entry: dict) -> list[str]:
     return names
 
 
+def entry_belongs_to_gasu(entry: dict) -> bool:
+    """Есть текстовое доказательство ГАГУ в ответе API — не только AF-ID."""
+    for name in affiliation_names(entry):
+        if is_gasu_name(name):
+            return True
+    for item in affiliation_items(entry):
+        city = (item.get("affiliation-city") or item.get("city") or "").strip()
+        name = (item.get("affilname") or item.get("affiliation-name") or item.get("name") or "").strip()
+        if is_gasu_city(city) and (is_gasu_name(name) or looks_like_university(name)):
+            return True
+    return False
+
+
 def has_gasu_affiliation(entry: dict) -> bool:
-    if AFFILIATION_ID in collect_afids(entry):
-        return True
-    return any(is_gasu_name(name) for name in affiliation_names(entry))
+    return entry_belongs_to_gasu(entry)
 
 
 def format_affiliations(entry: dict, ensure_gasu: bool = False) -> str:
     names = affiliation_names(entry)
-    if has_gasu_affiliation(entry) and not any(is_gasu_name(name) for name in names):
-        names = [GASU_PREFERRED_NAME, *names]
-    elif any(is_gasu_name(name) for name in names):
+    if any(is_gasu_name(name) for name in names):
         names = sorted(names, key=lambda name: 0 if is_gasu_name(name) else 1)
     return "; ".join(names)

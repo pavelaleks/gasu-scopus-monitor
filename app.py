@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 from docx import Document
 
-from gasu import build_query, format_affiliations
+from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
 from auth import cookie_manager, logout, require_login
 
 try:
@@ -20,7 +20,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -238,6 +238,8 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                 continue
             if entry.get("error"):
                 continue
+            if query_targets_gasu(query) and not entry_belongs_to_gasu(entry):
+                continue
             cover_date = (entry.get("prism:coverDate") or "").strip()
             records.append(
                 {
@@ -330,6 +332,11 @@ st.set_page_config(page_title="Мониторинг публикаций Scopus"
 auth_cookies = cookie_manager()
 if not require_login(auth_cookies):
     st.stop()
+
+if st.session_state.get("records_version") != APP_VERSION:
+    st.session_state.pop("records", None)
+    st.session_state.pop("query", None)
+    st.session_state.pop("date_filter", None)
 
 st.title("Мониторинг публикаций Scopus")
 
@@ -434,6 +441,7 @@ if search_clicked:
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
     st.session_state["query"] = query
+    st.session_state["records_version"] = APP_VERSION
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
@@ -442,8 +450,9 @@ if "records" in st.session_state and st.session_state["records"]:
 
     st.subheader("Результаты")
     st.caption(
-        f"Найдено документов: {len(records)}. Статьи с несколькими аффилиациями "
-        "не отфильтровываются: если Scopus видит ГАГУ у любого автора, запись остаётся."
+        f"Найдено документов: {len(records)}. В список входят только записи, "
+        "где в ответе Scopus видно ГАГУ по названию или городу "
+        "(в том числе как одна из нескольких аффилиаций)."
     )
     df = records_to_dataframe(records)
     st.dataframe(df, use_container_width=True)

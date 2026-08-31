@@ -4,6 +4,7 @@ from gasu import (
     AFFILIATION_ID,
     GASU_PREFERRED_NAME,
     build_query,
+    entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
     has_gasu_affiliation,
@@ -11,13 +12,14 @@ from gasu import (
 
 
 class GasuQueryTests(unittest.TestCase):
-    def test_clause_does_not_use_short_acronym(self):
+    def test_clause_uses_full_names_not_acronym_or_afid(self):
         clause = gasu_affiliation_clause()
-        self.assertIn(f"AF-ID({AFFILIATION_ID})", clause)
-        self.assertNotIn('AFFIL("GASU")', clause)
+        self.assertIn("AFFILORG(", clause)
         self.assertIn("Gorno-Altaisk State University", clause)
+        self.assertNotIn('AFFIL("GASU")', clause)
+        self.assertNotIn(f"AF-ID({AFFILIATION_ID})", clause)
 
-    def test_monitoring_query_keeps_all_gasu_hits(self):
+    def test_monitoring_query_is_name_based(self):
         query = build_query(
             "Мониторинг ГАГУ",
             "",
@@ -25,17 +27,19 @@ class GasuQueryTests(unittest.TestCase):
             {"mode": "current", "year": 2026, "year_start": 2026, "year_end": 2026},
             False,
         )
-        self.assertTrue(query.startswith("(AF-ID("))
+        self.assertIn("AFFILORG(", query)
         self.assertIn("PUBYEAR IS 2026", query)
+        self.assertNotIn("AF-ID(", query)
         self.assertNotIn('AFFIL("GASU")', query)
 
     def test_author_search_without_gasu_filter_does_not_restrict_affiliation(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, False)
-        self.assertNotIn("AF-ID(", query)
+        self.assertNotIn("AFFILORG(", query)
 
-    def test_author_search_with_gasu_uses_af_id(self):
+    def test_author_search_with_gasu_uses_names(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)
-        self.assertIn(f"AF-ID({AFFILIATION_ID})", query)
+        self.assertIn("AFFILORG(", query)
+        self.assertIn("Alekseev", query)
 
 
 class MultiAffiliationTests(unittest.TestCase):
@@ -52,28 +56,42 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertIn("Lomonosov Moscow State University", text)
         self.assertTrue(text.startswith("Gorno-Altaisk State University"))
 
-    def test_author_afid_keeps_paper_when_payload_shows_other_org(self):
-        """STANDARD/неполный ответ часто отдаёт только первую организацию."""
+    def test_innopolis_with_legacy_afid_is_rejected(self):
+        entry = {
+            "affiliation": [
+                {
+                    "affilname": "Innopolis University",
+                    "affiliation-city": "Innopolis",
+                    "afid": AFFILIATION_ID,
+                }
+            ],
+            "author": [{"surname": "Ivanov", "afid": [{"$": AFFILIATION_ID}]}],
+        }
+        self.assertFalse(entry_belongs_to_gasu(entry))
+        self.assertNotIn(GASU_PREFERRED_NAME, format_affiliations(entry, ensure_gasu=True))
+
+    def test_author_level_gasu_name_is_enough(self):
         entry = {
             "affiliation": [{"affilname": "Tomsk State University"}],
             "author": [
                 {
                     "surname": "Alekseev",
-                    "afid": [{"$": AFFILIATION_ID}, {"$": "60015150"}],
+                    "affiliation": {"affilname": "Gorno-Altaisk State University"},
                 }
             ],
         }
-        self.assertTrue(has_gasu_affiliation(entry))
-        text = format_affiliations(entry, ensure_gasu=True)
-        self.assertIn(GASU_PREFERRED_NAME, text)
-        self.assertIn("Tomsk State University", text)
+        self.assertTrue(entry_belongs_to_gasu(entry))
 
-    def test_query_match_does_not_invent_gasu_affiliation(self):
-        entry = {"affiliation": [{"affilname": "Innopolis University"}]}
-        self.assertFalse(has_gasu_affiliation(entry))
-        text = format_affiliations(entry, ensure_gasu=True)
-        self.assertNotIn(GASU_PREFERRED_NAME, text)
-        self.assertEqual(text, "Innopolis University")
+    def test_gorno_altaisk_city_plus_university_counts(self):
+        entry = {
+            "affiliation": [
+                {
+                    "affilname": "State University",
+                    "affiliation-city": "Gorno-Altaysk",
+                }
+            ]
+        }
+        self.assertTrue(entry_belongs_to_gasu(entry))
 
     def test_variant_spelling_counts_as_gasu(self):
         entry = {"affiliation": [{"affilname": "Gorno-Altaysk State University, Russian Federation"}]}

@@ -27,7 +27,6 @@ from gasu import (
     record_has_gasu,
     scopus_authid,
     truncated_author_paper_count,
-    gasu_author_roster_query,
 )
 
 
@@ -40,13 +39,20 @@ class GasuQueryTests(unittest.TestCase):
         self.assertNotIn('AFFIL("GASU")', clause)
         self.assertNotIn(f"AF-ID({AFFILIATION_ID})", clause)
 
-    def test_author_roster_query_uses_full_university_names(self):
-        query = gasu_author_roster_query()
-        self.assertIn('AFFIL("Gorno-Altaisk State University")', query)
-        self.assertNotIn("AFFILORG(", query)
-        self.assertNotIn('AFFIL("GASU")', query)
+    def test_rsf_query_uses_gasu_names_and_window(self):
+        query = build_query(
+            "РНФ",
+            "",
+            "",
+            {"mode": "range", "year": 2021, "year_start": 2021, "year_end": 2026},
+            False,
+        )
+        self.assertIn("AFFILORG(", query)
+        self.assertIn("Gorno-Altaisk State University", query)
+        self.assertIn("PUBYEAR > 2020", query)
+        self.assertIn("PUBYEAR < 2027", query)
+        self.assertNotIn("AUTH(", query)
         self.assertNotIn(f"AF-ID({AFFILIATION_ID})", query)
-        self.assertNotIn('AFFIL("Altai State University")', query)
 
     def test_monitoring_query_is_name_based(self):
         query = build_query(

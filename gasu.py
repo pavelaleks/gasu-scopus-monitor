@@ -91,7 +91,7 @@ def build_query(
 ) -> str:
     affil_query = gasu_affiliation_clause()
 
-    if mode == "Мониторинг ГАГУ":
+    if mode in ("Мониторинг ГАГУ", "РНФ"):
         base = affil_query
         if date_filter:
             if date_filter["mode"] == "current":
@@ -326,11 +326,6 @@ def gasu_author_affil_clause() -> str:
     return "(" + " OR ".join(f"AFFIL({quoted(name)})" for name in names) + ")"
 
 
-def gasu_author_roster_query() -> str:
-    """Все профили с текущей аффилиацией ГАГУ: полные имена вуза, без AF-ID и без GASU."""
-    return "(" + " OR ".join(f"AFFIL({quoted(name)})" for name in AFFILIATION_NAMES) + ")"
-
-
 def author_profile_query(
     surname: str,
     initials: str = "",
@@ -523,10 +518,6 @@ def _author_entry_is_gasu(entry: dict) -> bool:
     name = str(aff.get("affiliation-name") or aff.get("affilname") or "")
     city = str(aff.get("affiliation-city") or "")
     return is_gasu_name(name) or is_gasu_city(city)
-
-
-def author_search_entry_is_gasu(entry: dict) -> bool:
-    return _author_entry_is_gasu(entry)
 
 
 def pick_scopus_authid(

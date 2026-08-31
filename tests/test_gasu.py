@@ -16,6 +16,8 @@ from gasu import (
     has_gasu_affiliation,
     match_authid_on_paper,
     needs_author_enrichment,
+    normalize_orcid,
+    orcid_id_query,
     parse_author_retrieval,
     parse_author_search_profile,
     parse_authors,
@@ -50,6 +52,24 @@ class GasuQueryTests(unittest.TestCase):
     def test_author_search_without_gasu_filter_does_not_restrict_affiliation(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, False)
         self.assertNotIn("AFFILORG(", query)
+
+    def test_author_search_with_orcid_is_person_query(self):
+        query = build_query(
+            "Поиск по автору",
+            "Alekseev",
+            "https://orcid.org/0000-0003-3680-1785",
+            {"mode": "range", "year_start": 2021, "year_end": 2026},
+            False,
+        )
+        self.assertEqual(normalize_orcid("https://orcid.org/0000-0003-3680-1785"), "0000-0003-3680-1785")
+        self.assertIn('ORCID("0000-0003-3680-1785")', query)
+        self.assertIn("PUBYEAR > 2020", query)
+        self.assertNotIn("AFFILORG(", query)
+        self.assertNotIn("AUTH(", query.replace("AUTHLAST", ""))
+        self.assertEqual(
+            orcid_id_query("0000-0003-3680-1785", 2021, 2026),
+            'ORCID("0000-0003-3680-1785") AND PUBYEAR > 2020 AND PUBYEAR < 2027',
+        )
 
     def test_author_search_with_gasu_uses_names(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)

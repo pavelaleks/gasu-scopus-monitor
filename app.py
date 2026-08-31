@@ -25,11 +25,14 @@ from gasu import (
     first_initial,
     format_affiliations,
     needs_author_enrichment,
+    normalize_orcid,
+    orcid_id_query,
     parse_author_retrieval,
     parse_author_search_profile,
     parse_authors,
     pick_scopus_authid,
     query_targets_gasu,
+    quoted,
 )
 from report import (
     ReportData,
@@ -78,7 +81,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.8"
+APP_VERSION = "1.8.9"
 APP_UPDATED_FALLBACK = "29.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_AUTHOR = "Поиск по автору"
@@ -617,14 +620,23 @@ def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple
     for cand in candidates:
         row = dict(cand)
         authid = (cand.get("authid") or "").strip()
-        if not authid:
+        orcid = normalize_orcid(cand.get("orcid") or cand.get("ORCID") or "")
+        if not authid and not orcid:
             expanded.append(row)
             continue
         try:
-            if authid not in totals:
-                query = author_id_query(authid, window.from_year, window.to_year)
-                totals[authid] = fetch_scopus_total(query, api_key)
-            apply_author_total(row, totals[authid], "профиль Scopus (AU-ID)")
+            if authid:
+                cache_key = f"id|{authid}"
+                if cache_key not in totals:
+                    query = author_id_query(authid, window.from_year, window.to_year)
+                    totals[cache_key] = fetch_scopus_total(query, api_key)
+                apply_author_total(row, totals[cache_key], "профиль Scopus (AU-ID)")
+            else:
+                cache_key = f"orcid|{orcid}"
+                if cache_key not in totals:
+                    query = orcid_id_query(orcid, window.from_year, window.to_year)
+                    totals[cache_key] = fetch_scopus_total(query, api_key)
+                apply_author_total(row, totals[cache_key], "профиль Scopus (ORCID)")
             counted += 1
         except Exception:
             failed += 1
@@ -1040,11 +1052,24 @@ if search_clicked:
             query = author_papers_query(author_id_digits, date_filter, only_gasu)
             target_profile = {"authid": author_id_digits}
         elif author_orcid:
+            ident = normalize_orcid(author_orcid)
             identity = "orcid"
-            query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
-            orcid_entries = _author_search_entries(f'ORCID("{author_orcid.strip()}")', api_key)
-            if len(orcid_entries) == 1:
+            query = build_query(mode, author_last, ident, date_filter, only_gasu)
+            orcid_entries = _author_search_entries(f"ORCID({quoted(ident)})", api_key)
+            ids = list(
+                dict.fromkeys(
+                    author_search_id(entry) for entry in orcid_entries if author_search_id(entry)
+                )
+            )
+            if len(ids) == 1:
+                target_profile = parse_author_search_profile(
+                    next(entry for entry in orcid_entries if author_search_id(entry) == ids[0])
+                )
+            elif len(orcid_entries) == 1:
                 target_profile = parse_author_search_profile(orcid_entries[0])
+            if target_profile.get("authid"):
+                identity = "au-id"
+                query = author_papers_query(target_profile["authid"], date_filter, only_gasu)
         else:
             with st.spinner("Ищем профиль автора в Scopus..."):
                 target_profile = resolve_author_profile(
@@ -1189,7 +1214,7 @@ if "records" in st.session_state and st.session_state["records"]:
             "Счёт РНФ — по тем же статьям, что список литературы ниже. "
             "Профиль автора (Author ID, ORCID, h-индекс, документы, цитирования) берётся из Author Search / Author Retrieval, "
             "как на странице автора в Scopus. Если API не отдаёт поле — ячейка пустая. "
-            "«Всего Scopus» в окне РНФ уточняется запросом AU-ID. "
+            "«Всего Scopus» в окне РНФ уточняется по Author ID, если его нет — по ORCID. "
             "Это оценка для мониторинга, не экспертиза заявки."
             + (
                 f" Author ID есть у {counted} из {people} авторов."

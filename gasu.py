@@ -59,6 +59,16 @@ def quoted(value: str) -> str:
     return f'"{cleaned}"'
 
 
+def normalize_orcid(value: str) -> str:
+    text = (value or "").strip()
+    lower = text.lower()
+    for prefix in ("https://orcid.org/", "http://orcid.org/"):
+        if lower.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    return text.strip().replace(" ", "")
+
+
 def gasu_affiliation_clause() -> str:
     """Только узнаваемые имена вуза, без акронима GASU и без AF-ID."""
     names = " OR ".join(f"AFFILORG({quoted(name)})" for name in AFFILIATION_NAMES)
@@ -92,7 +102,7 @@ def build_query(
         return base
 
     if orcid:
-        base = f"ORCID({quoted(orcid)})"
+        base = f"ORCID({quoted(normalize_orcid(orcid))})"
     else:
         base = f"AUTH({quoted(last)})"
 
@@ -287,6 +297,11 @@ def scopus_authid(author: dict) -> str:
 def author_id_query(authid: str, year_start: int, year_end: int) -> str:
     ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
     return f"AU-ID({ident}) AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+
+
+def orcid_id_query(orcid: str, year_start: int, year_end: int) -> str:
+    ident = normalize_orcid(orcid)
+    return f"ORCID({quoted(ident)}) AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
 
 
 def first_initial(initials: str = "", given: str = "") -> str:

@@ -295,6 +295,7 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
         "given": bucket.get("given") or "",
         "initials": bucket.get("initials") or (parts[1] if len(parts) > 1 else ""),
         "sample_scopus_id": bucket.get("sample_scopus_id") or "",
+        "orcid": bucket.get("orcid") or "",
         "ORCID": bucket.get("orcid") or "",
         "h-индекс": "" if bucket.get("h_index") is None else bucket.get("h_index"),
         "Документов": "" if bucket.get("documents") is None else bucket.get("documents"),
@@ -426,7 +427,7 @@ def apply_author_total(candidate: dict, total: int, account: str = "все ст�
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
-    hide = {"surname", "given", "initials", "sample_scopus_id"}
+    hide = {"surname", "given", "initials", "sample_scopus_id", "orcid"}
     order = (
         "Автор",
         "Author ID",

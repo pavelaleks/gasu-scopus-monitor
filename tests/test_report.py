@@ -1,6 +1,7 @@
 import unittest
 
 from report import (
+    apply_author_corpus,
     build_report,
     has_external_affiliation,
     report_area_png,
@@ -8,7 +9,8 @@ from report import (
     report_quartile_png,
     report_scope_label,
     report_sentence,
-    rsf_applicants,
+    rsf_candidates,
+    rsf_eligibility_rows,
     ru_publications,
     top_authors,
 )
@@ -122,7 +124,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(by_name["Petrov P.P."]["Без квартиля"], 1)
         self.assertEqual(rows[0]["Автор"], "Ivanov I.I.")
 
-    def test_rsf_applicants_keep_gasu_authors_above_threshold(self):
+    def test_rsf_drops_pure_external_coauthor(self):
         records = [
             {
                 "authors": [
@@ -132,15 +134,12 @@ class ReportTests(unittest.TestCase):
             }
             for _ in range(8)
         ]
-        records.append(
-            {"authors": [{"surname": "Sidorov", "given": "S", "initials": "S.", "from_gasu": True}]}
-        )
-        rows, skipped_external = rsf_applicants(records, 8)
-        self.assertTrue(skipped_external)
+        rows = rsf_eligibility_rows(rsf_candidates(records), 8)
         self.assertEqual([row["Автор"] for row in rows], ["Ivanov I."])
-        self.assertEqual(rows[0]["Публикаций"], 8)
+        self.assertEqual(rows[0]["Всего Scopus"], 8)
+        self.assertEqual(rows[0]["С ГАГУ"], 8)
 
-    def test_rsf_includes_author_without_personal_affiliation(self):
+    def test_rsf_excludes_chanchaeva_and_keeps_alekseev(self):
         records = [
             {
                 "authors": [
@@ -150,10 +149,48 @@ class ReportTests(unittest.TestCase):
             }
             for _ in range(8)
         ]
-        rows, _ = rsf_applicants(records, 8)
-        names = [row["Автор"] for row in rows]
+        names = [row["Автор"] for row in rsf_eligibility_rows(rsf_candidates(records), 8)]
         self.assertEqual(names, ["Alekseev P.V."])
-        self.assertTrue(all("Chanchaeva" not in name and "Чанчаева" not in name for name in names))
+
+    def test_rsf_threshold_uses_all_scopus_papers(self):
+        from datetime import date
+
+        from rsf import rsf_window
+
+        window = rsf_window(date(2026, 8, 31))
+        gasu_paper = {
+            "year": "2022",
+            "cover_date": "2022-03-01",
+            "affiliation": "Gorno-Altaisk State University",
+            "authors": [
+                {
+                    "surname": "Alekseev",
+                    "given": "Pavel",
+                    "initials": "P.V.",
+                    "from_gasu": None,
+                    "authid": "57200000000",
+                }
+            ],
+        }
+        candidates = rsf_candidates([gasu_paper, dict(gasu_paper), dict(gasu_paper)])
+        self.assertEqual(candidates[0]["С ГАГУ"], 3)
+        self.assertEqual(candidates[0]["Всего Scopus"], 3)
+        corpus = [dict(gasu_paper) for _ in range(3)] + [
+            {
+                "year": "2023",
+                "cover_date": "2023-05-01",
+                "affiliation": "Tomsk State University",
+                "scimago_quartile": "Q2",
+            }
+            for _ in range(5)
+        ]
+        apply_author_corpus(candidates[0], corpus, window)
+        self.assertEqual(candidates[0]["Всего Scopus"], 8)
+        self.assertEqual(candidates[0]["С ГАГУ"], 3)
+        self.assertEqual(candidates[0]["Учёт"], "все статьи автора")
+        rows = rsf_eligibility_rows(candidates, 8)
+        self.assertEqual([row["Автор"] for row in rows], ["Alekseev P.V."])
+        self.assertNotIn("authid", rows[0])
 
 
 if __name__ == "__main__":

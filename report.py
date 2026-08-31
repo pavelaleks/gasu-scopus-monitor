@@ -6,8 +6,8 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 
-from gasu import is_gasu_name
-from rsf import rsf_name_excluded
+from gasu import is_gasu_name, record_has_gasu
+from rsf import record_in_rsf_window, rsf_name_excluded
 
 
 @dataclass(frozen=True)
@@ -129,11 +129,14 @@ def author_display_name(author: dict) -> str:
 
 
 def author_merge_key(author: dict) -> str | None:
+    authid = (author.get("authid") or "").strip()
+    if authid.isdigit():
+        return f"id|{authid}"
     surname = (author.get("surname") or "").strip()
     if not surname:
         return None
     initials = _author_initials(author)
-    first = initials[:2].lower() if initials else ""
+    first = next((ch.lower() for ch in initials if ch.isalpha()), "")
     return f"{surname.lower()}|{first}"
 
 
@@ -227,25 +230,116 @@ def top_authors(records: list[dict], limit: int = 10) -> list[dict]:
     return author_stats(records, limit=limit)
 
 
-def rsf_applicants(records: list[dict], min_papers: int) -> tuple[list[dict], bool]:
-    """Авторы с числом статей ≥ порога на работах ГАГУ.
+def _empty_author_bucket() -> dict:
+    return {
+        "names": Counter(),
+        "authid": "",
+        "flags": set(),
+        "gasu_n": 0,
+        "Q1": 0,
+        "Q2": 0,
+        "Q3": 0,
+        "Q4": 0,
+        "none": 0,
+    }
 
-    Известных внешних соавторов (from_gasu is False) не считаем, но автора без
-    персональной аффилиации в ответе Scopus не отбрасываем — иначе выпадают
-    сотрудники вуза вроде Алексеева. Умерших в этот список не включаем.
-    """
-    skipped_external = any(
-        author.get("from_gasu") is False
-        for rec in records
-        for author in rec.get("authors") or []
-    )
-    rows = author_stats(records, only_gasu=True)
-    eligible = [
-        row
-        for row in rows
-        if int(row["Публикаций"]) >= min_papers and not rsf_name_excluded(str(row.get("Автор") or ""))
+
+def _add_quartile(bucket: dict, record: dict) -> None:
+    quartile = record.get("scimago_quartile") or "Нет"
+    if quartile not in {"Q1", "Q2", "Q3", "Q4"}:
+        bucket["none"] += 1
+    else:
+        bucket[quartile] += 1
+
+
+def _candidate_row(bucket: dict, *, account: str) -> dict:
+    name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
+    total = int(bucket.get("total") or bucket["gasu_n"])
+    gasu_n = int(bucket["gasu_n"])
+    return {
+        "Автор": name,
+        "authid": bucket.get("authid") or "",
+        "Всего Scopus": total,
+        "С ГАГУ": gasu_n,
+        "Q1": bucket["Q1"],
+        "Q2": bucket["Q2"],
+        "Q3": bucket["Q3"],
+        "Q4": bucket["Q4"],
+        "Без квартиля": bucket["none"],
+        "Учёт": account,
+    }
+
+
+def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
+    """Кто связан с ГАГУ: есть в статьях вуза, не чистый внешний соавтор, не из исключений."""
+    buckets: dict[str, dict] = {}
+    for rec in gasu_records:
+        seen: set[str] = set()
+        for author in rec.get("authors") or []:
+            name = author_display_name(author)
+            if rsf_name_excluded(name) or rsf_name_excluded(author.get("surname") or ""):
+                continue
+            key = author_merge_key(author)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            bucket = buckets.get(key)
+            if bucket is None:
+                bucket = _empty_author_bucket()
+                buckets[key] = bucket
+            bucket["names"][name or (author.get("surname") or "")] += 1
+            authid = (author.get("authid") or "").strip()
+            if authid.isdigit():
+                bucket["authid"] = authid
+            bucket["flags"].add(author.get("from_gasu"))
+            bucket["gasu_n"] += 1
+            _add_quartile(bucket, rec)
+    rows = []
+    for bucket in buckets.values():
+        flags = bucket["flags"]
+        if flags and flags <= {False}:
+            continue
+        bucket["total"] = bucket["gasu_n"]
+        rows.append(_candidate_row(bucket, account="только статьи с ГАГУ"))
+    rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
+    return rows
+
+
+def apply_author_corpus(candidate: dict, records: list[dict], window) -> dict:
+    """Подставить все статьи автора в окне РНФ, не только с ГАГУ."""
+    subset = [rec for rec in records if record_in_rsf_window(rec, window)]
+    gasu_n = sum(1 for rec in subset if record_has_gasu(rec))
+    known_gasu = int(candidate.get("С ГАГУ") or 0)
+    total = max(len(subset), known_gasu)
+    gasu_n = max(gasu_n, known_gasu)
+    q = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0, "none": 0}
+    for rec in subset:
+        _add_quartile(q, rec)
+    candidate["Всего Scopus"] = total
+    candidate["С ГАГУ"] = gasu_n
+    candidate["Q1"] = q["Q1"]
+    candidate["Q2"] = q["Q2"]
+    candidate["Q3"] = q["Q3"]
+    candidate["Q4"] = q["Q4"]
+    candidate["Без квартиля"] = q["none"]
+    candidate["Учёт"] = "все статьи автора"
+    return candidate
+
+
+def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
+    rows = [
+        {k: v for k, v in row.items() if k != "authid"}
+        for row in candidates
+        if int(row.get("Всего Scopus") or 0) >= min_papers
+        and not rsf_name_excluded(str(row.get("Автор") or ""))
     ]
-    return eligible, skipped_external
+    rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
+    return rows
+
+
+def rsf_applicants(records: list[dict], min_papers: int) -> tuple[list[dict], bool]:
+    """Запасной путь без добора по Author ID: порог по статьям ГАГУ."""
+    return rsf_eligibility_rows(rsf_candidates(records), min_papers), False
 
 
 def report_sentence(report: ReportData) -> str:

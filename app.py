@@ -14,10 +14,12 @@ from auth import cookie_manager, logout, require_login
 from gasu import (
     GASU_FOUNDED_YEAR,
     author_belongs_to_gasu,
+    author_id_query,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
     query_targets_gasu,
+    scopus_authid,
 )
 from report import (
     ReportData,
@@ -27,9 +29,11 @@ from report import (
     report_quartile_png,
     report_scope_label,
     report_sentence,
-    rsf_applicants,
+    rsf_candidates,
+    rsf_eligibility_rows,
     ru_publications,
     top_authors,
+    apply_author_corpus,
 )
 from rsf import record_in_rsf_window, rsf_window
 from scimago import (
@@ -56,7 +60,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -141,6 +145,7 @@ def parse_authors(entry: dict) -> list[dict]:
                     "given": given,
                     "initials": initials,
                     "from_gasu": author_belongs_to_gasu(item),
+                    "authid": scopus_authid(item),
                 }
             )
     creator = (entry.get("dc:creator") or "").strip()
@@ -339,6 +344,27 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
             break
     records.sort(key=lambda item: item.get("cover_date") or "", reverse=True)
     return records
+
+
+def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> list[dict]:
+    expanded = []
+    for cand in candidates:
+        row = dict(cand)
+        authid = (cand.get("authid") or "").strip()
+        if authid:
+            query = author_id_query(authid, window.from_year, window.to_year)
+            try:
+                papers = fetch_scopus_data(query, api_key, None)
+                try:
+                    attach_scimago(papers)
+                except Exception:
+                    for rec in papers:
+                        rec.setdefault("scimago_quartile", "Нет")
+                apply_author_corpus(row, papers, window)
+            except Exception:
+                pass
+        expanded.append(row)
+    return expanded
 
 
 def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
@@ -577,6 +603,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_min",
         "grant_contest_year",
         "grant_from_year",
+        "grant_rows",
     ):
         st.session_state.pop(key, None)
 
@@ -646,8 +673,9 @@ with quick3:
     )
 st.caption(
     f"РНФ: ближайший конкурс — {window.contest_year} год. "
-    f"Считаются статьи Scopus с {window.from_label} (для конкурса Y — с января Y−6, окно сдвигается само). "
-    "В список попадают авторы, у которых на статье указана аффилиация ГАГУ."
+    f"Порог считается по всем статьям Scopus автора с {window.from_label}, а не только с аффилиацией ГАГУ. "
+    "В список попадают люди, у которых в этом окне есть хотя бы одна статья с ГАГУ. "
+    "Штат или совместительство Scopus не показывает."
 )
 
 mode = st.radio("Режим поиска", ["Мониторинг ГАГУ", "Поиск по автору"], horizontal=True)
@@ -762,40 +790,50 @@ if search_clicked:
         st.session_state["grant_min"] = grant_min
         st.session_state["grant_contest_year"] = window.contest_year
         st.session_state["grant_from_year"] = window.from_year
+        candidates = rsf_candidates(records)
+        with st.spinner(
+            "Считаем все статьи Scopus каждого автора по Author ID, не только публикации с ГАГУ..."
+        ):
+            expanded = expand_rsf_candidates(candidates, window, api_key)
+        st.session_state["grant_rows"] = rsf_eligibility_rows(expanded, grant_min)
     else:
         st.session_state.pop("grant_min", None)
         st.session_state.pop("grant_contest_year", None)
         st.session_state.pop("grant_from_year", None)
+        st.session_state.pop("grant_rows", None)
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
     active_date_filter = st.session_state.get("date_filter")
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
     grant_min_saved = st.session_state.get("grant_min")
-    grant_rows: list[dict] = []
+    grant_rows: list[dict] = list(st.session_state.get("grant_rows") or [])
     if grant_min_saved:
-        grant_rows, _ = rsf_applicants(records, int(grant_min_saved))
         contest = st.session_state.get("grant_contest_year")
         from_year = st.session_state.get("grant_from_year")
         st.subheader("Потенциальные грантодержатели РНФ")
         st.write(
-            f"Конкурс {contest}: публикации Scopus с января {from_year}. "
-            f"Порог — не менее {grant_min_saved} статей."
+            f"Конкурс {contest}: порог — не менее {grant_min_saved} публикаций Scopus "
+            f"с января {from_year}, с любой аффилиацией."
         )
-        g1, g2 = st.columns(2)
+        g1, g2, g3 = st.columns(3)
         g1.metric("Могут подавать сейчас", len(grant_rows))
         g2.metric("Статей ГАГУ в окне", len(records))
+        g3.metric("Порог", f"{grant_min_saved} Scopus")
         if grant_rows:
             st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
         else:
-            st.info("Никто не набрал порог по статьям Scopus с аффилиацией ГАГУ в этом окне.")
+            st.info("Никто не набрал порог по всем статьям Scopus в этом окне.")
         st.caption(
-            "Считаются авторы статей, где в Scopus указана ГАГУ. "
-            "Если у человека в карточке нет своей организации, он всё равно входит в подсчёт — "
-            "иначе выпадают сотрудники вуза. Известные внешние соавторы и авторы, "
-            "которые заведомо не могут подать заявку, в этот список не входят. "
-            "Соавторство учитывается. Статьи того же человека без аффилиации ГАГУ сюда не попадают. "
-            "Это оценка по Scopus для мониторинга, не экспертиза заявки РНФ."
+            "Кандидат — человек, у которого в окне есть хотя бы одна статья с ГАГУ: "
+            "так программа узнаёт связь с вузом, штатное расписание ей недоступно. "
+            "«Всего Scopus» — все его статьи за период, в том числе без ГАГУ. "
+            "«С ГАГУ» — сколько из них с аффилиацией университета. "
+            "Совместитель с парой статей ГАГУ и большим личным списком тоже попадёт: "
+            "это видно по двум столбцам, решение за проректором. "
+            "Чистый внешний соавтор (на статьях ГАГУ у него всегда чужая организация) не включается. "
+            "Если нет Scopus Author ID, считаются только статьи с ГАГУ. "
+            "Это оценка для мониторинга, не экспертиза заявки."
         )
 
     st.subheader("Результаты")

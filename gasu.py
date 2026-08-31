@@ -248,6 +248,32 @@ def _affiliation_dict_is_gasu(item: dict) -> bool:
     return bool(is_gasu_city(city) and (is_gasu_name(name) or looks_like_university(name)))
 
 
+def scopus_authid(author: dict) -> str:
+    if not isinstance(author, dict):
+        return ""
+    for key in ("authid", "auid", "@auid"):
+        raw = author.get(key)
+        if isinstance(raw, dict):
+            raw = raw.get("$") or raw.get("@id") or raw.get("#text")
+        text = str(raw or "").strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 6:
+            return digits
+    return ""
+
+
+def author_id_query(authid: str, year_start: int, year_end: int) -> str:
+    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    return f"AU-ID({ident}) AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+
+
+def record_has_gasu(record: dict) -> bool:
+    for part in (record.get("affiliation") or "").split(";"):
+        if is_gasu_name(part):
+            return True
+    return False
+
+
 def author_belongs_to_gasu(author: dict) -> bool | None:
     """True/False, если у автора в Scopus есть свои аффилиации; иначе None."""
     if not isinstance(author, dict):

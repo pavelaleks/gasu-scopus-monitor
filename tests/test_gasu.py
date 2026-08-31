@@ -5,11 +5,14 @@ from gasu import (
     GASU_FOUNDED_YEAR,
     GASU_PREFERRED_NAME,
     author_belongs_to_gasu,
+    author_id_query,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
     has_gasu_affiliation,
+    record_has_gasu,
+    scopus_authid,
 )
 
 
@@ -130,6 +133,10 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertIsNone(author_belongs_to_gasu(unknown))
         id_only = {"surname": "Alekseev", "affiliation": {"@id": "https://api.elsevier.com/content/affiliation/affiliation_id/60105869"}}
         self.assertIsNone(author_belongs_to_gasu(id_only))
+        self.assertEqual(scopus_authid({"authid": "57202111111"}), "57202111111")
+        self.assertEqual(author_id_query("57202111111", 2021, 2026), "AU-ID(57202111111) AND PUBYEAR > 2020 AND PUBYEAR < 2027")
+        self.assertTrue(record_has_gasu({"affiliation": "Gorno-Altaisk State University; Tomsk State University"}))
+        self.assertFalse(record_has_gasu({"affiliation": "Tomsk State University"}))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 

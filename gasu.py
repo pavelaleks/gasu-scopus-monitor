@@ -18,6 +18,7 @@ GASU_PREFERRED_NAME = "Gorno-Altaisk State University"
 AFFILIATION_NAMES = [
     "Gorno-Altaisk State University",
     "Gorno-Altaysk State University",
+    "Gorno-Altai State University",
     "Gorno-Altaisk State Univ",
     "Gorno-Altaysk State Univ",
     "GORNO ALTAISK STATE UNIV",
@@ -32,6 +33,8 @@ GASU_NAME_MARKERS = (
     "gorno altaisk state",
     "gorno-altaysk state",
     "gorno altaysk state",
+    "gorno-altai state",
+    "gorno altai state",
     "gorno-altay state univ",
     "gorno altay state univ",
     "gorno alta state univ",

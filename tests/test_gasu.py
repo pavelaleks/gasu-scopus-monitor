@@ -16,6 +16,7 @@ class GasuQueryTests(unittest.TestCase):
         clause = gasu_affiliation_clause()
         self.assertIn("AFFILORG(", clause)
         self.assertIn("Gorno-Altaisk State University", clause)
+        self.assertIn("Gorno-Altai State University", clause)
         self.assertNotIn('AFFIL("GASU")', clause)
         self.assertNotIn(f"AF-ID({AFFILIATION_ID})", clause)
 
@@ -96,6 +97,15 @@ class MultiAffiliationTests(unittest.TestCase):
     def test_variant_spelling_counts_as_gasu(self):
         entry = {"affiliation": [{"affilname": "Gorno-Altaysk State University, Russian Federation"}]}
         self.assertTrue(has_gasu_affiliation(entry))
+
+    def test_gorno_altai_without_sk_counts_as_gasu(self):
+        entry = {"affiliation": [{"affilname": "Gorno-Altai State University"}]}
+        self.assertTrue(has_gasu_affiliation(entry))
+        self.assertIn("Gorno-Altai State University", gasu_affiliation_clause())
+
+    def test_altai_state_university_is_not_gasu(self):
+        entry = {"affiliation": [{"affilname": "Altai State University"}]}
+        self.assertFalse(has_gasu_affiliation(entry))
 
 
 if __name__ == "__main__":

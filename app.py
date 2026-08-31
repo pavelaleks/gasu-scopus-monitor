@@ -20,6 +20,7 @@ from report import (
     report_quartile_png,
     report_scope_label,
     report_sentence,
+    ru_publications,
     top_authors,
 )
 from scimago import (
@@ -46,7 +47,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -432,24 +433,28 @@ def render_report_block(
     if report.year_rows:
         st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
 
-    years = sorted({str(rec.get("year")) for rec in records if str(rec.get("year") or "").isdigit()})
+    years = [str(year) for year in report.counts]
     if years:
+        period = report.year_label
+        all_label = f"Весь период ({period})"
         st.markdown("**Состав выборки**")
         st.caption(
-            "Столбцы выше — сколько публикаций по годам. Круги показывают, из каких областей и квартилей "
-            "состоит выбранный год. Сами годы на столбцах не меняются."
+            f"Столбцы выше — сколько публикаций в каждом году. "
+            f"Круги по умолчанию складывают все статьи найденного периода "
+            f"{period} ({ru_publications(report.total)}). "
+            "Это годы текущего поиска, а не вся история университета. "
+            "Кнопка с одним годом показывает только его состав; столбцы при этом не меняются."
         )
-        year_options = ["Все годы", *years]
         if len(years) == 1:
             year_filter = years[0]
         else:
             year_choice = st.radio(
-                "Год на круговых диаграммах",
-                year_options,
+                "Что показать на кругах",
+                [all_label, *years],
                 horizontal=True,
                 key="area_chart_year",
             )
-            year_filter = None if year_choice == "Все годы" else year_choice
+            year_filter = None if year_choice == all_label else year_choice
         scope = report_scope_label(
             records,
             university=university,
@@ -458,51 +463,54 @@ def render_report_block(
         )
         area_rows = area_share_rows(records, year_filter)
         q_rows = quartile_share_rows(records, year_filter)
+        png = report_area_png(
+            grouped_area_counts(area_rows),
+            title=f"{scope} · области знаний",
+        )
+        png_q = report_quartile_png(q_rows, title=f"{scope} · квартили SCImago")
         left, right = st.columns(2, gap="medium")
         with left:
-            if area_rows:
-                png = report_area_png(
-                    grouped_area_counts(area_rows),
-                    title=f"{scope} · области знаний",
-                )
-                st.image(png, use_container_width=True)
+            st.image(png, use_container_width=True)
         with right:
-            if q_rows:
-                png_q = report_quartile_png(q_rows, title=f"{scope} · квартили SCImago")
-                st.image(png_q, use_container_width=True)
+            st.image(png_q, use_container_width=True)
         dl_left, dl_right = st.columns(2, gap="medium")
         with dl_left:
-            if area_rows:
-                st.download_button(
-                    "Скачать области (PNG)",
-                    data=png,
-                    file_name="scopus_oblasti.png",
-                    mime="image/png",
-                    key="download_area_png",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "Скачать области (PNG)",
+                data=png,
+                file_name="scopus_oblasti.png",
+                mime="image/png",
+                key="download_area_png",
+                use_container_width=True,
+            )
         with dl_right:
-            if q_rows:
-                st.download_button(
-                    "Скачать квартили (PNG)",
-                    data=png_q,
-                    file_name="scopus_kvartili.png",
-                    mime="image/png",
-                    key="download_quartile_png",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "Скачать квартили (PNG)",
+                data=png_q,
+                file_name="scopus_kvartili.png",
+                mime="image/png",
+                key="download_quartile_png",
+                use_container_width=True,
+            )
+        slice_count = (
+            report.total
+            if year_filter is None
+            else int(report.counts.get(int(year_filter), 0))
+        )
         st.caption(
-            f"{scope}. Слева — основная область журнала в Scopus (одна статья — один сектор; "
+            f"{scope}: {ru_publications(slice_count)}. "
+            "Слева — основная область журнала в Scopus (одна статья — один сектор; "
             "без ISSN — «Не указано»). Справа — лучший квартиль журнала SCImago; "
             "если года статьи ещё нет в рейтинге, берётся последний закрытый год."
         )
-        detail_left, detail_right = st.columns(2, gap="medium")
-        with detail_left:
-            if area_rows:
-                st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
-        with detail_right:
-            if q_rows:
-                st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
+        if slice_count:
+            detail_left, detail_right = st.columns(2, gap="medium")
+            with detail_left:
+                if area_rows:
+                    st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
+            with detail_right:
+                if q_rows:
+                    st.dataframe(pd.DataFrame(q_rows), hide_index=True, use_container_width=True)
 
     if university:
         st.markdown("**Наиболее активные авторы**")

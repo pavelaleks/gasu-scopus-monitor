@@ -296,35 +296,39 @@ def build_area_figure(
 
     values = [count for _, count in slices]
     total = sum(values)
-    fig, ax = plt.subplots(figsize=(6.4, 2.8), dpi=120)
+    fig = plt.figure(figsize=(5.8, 2.9), dpi=120)
     fig.patch.set_facecolor("white")
+    fig.text(0.5, 0.93, title, ha="center", va="top", fontsize=10)
+    ax = fig.add_axes([0.02, 0.06, 0.40, 0.74])
     ax.set_facecolor("white")
+    legend_ax = fig.add_axes([0.44, 0.06, 0.54, 0.74])
+    legend_ax.set_axis_off()
     if not total:
         ax.text(0.5, 0.5, "Нет данных", ha="center", va="center")
         ax.set_axis_off()
-        fig.tight_layout(pad=0.4)
         return fig
     palette = colors or [DONUT_COLORS[i % len(DONUT_COLORS)] for i in range(len(values))]
-    ax.pie(
+    wedges, _ = ax.pie(
         values,
         colors=palette,
         startangle=90,
         wedgeprops={"width": 0.48, "edgecolor": "white", "linewidth": 1.2},
     )
-    legend = []
+    ax.set_aspect("equal")
+    labels = []
     for name, count in slices:
         pct = round(count / total * 100)
-        legend.append(f"{name} — {count} ({pct}%)")
-    ax.legend(
-        legend,
+        labels.append(f"{name} — {count} ({pct}%)")
+    legend_ax.legend(
+        wedges,
+        labels,
         loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
         frameon=False,
         fontsize=8,
-        labelspacing=0.45,
+        labelspacing=0.42,
+        handlelength=1.0,
+        borderaxespad=0,
     )
-    ax.set_title(title, fontsize=10, pad=8)
-    fig.tight_layout(pad=0.35)
     return fig
 
 

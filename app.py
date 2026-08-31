@@ -46,7 +46,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -434,8 +434,22 @@ def render_report_block(
 
     years = sorted({str(rec.get("year")) for rec in records if str(rec.get("year") or "").isdigit()})
     if years:
-        area_choice = st.selectbox("Срез для диаграмм", ["Весь период", *years], key="area_chart_year")
-        year_filter = None if area_choice == "Весь период" else area_choice
+        st.markdown("**Состав выборки**")
+        st.caption(
+            "Столбцы выше — сколько публикаций по годам. Круги показывают, из каких областей и квартилей "
+            "состоит выбранный год. Сами годы на столбцах не меняются."
+        )
+        year_options = ["Все годы", *years]
+        if len(years) == 1:
+            year_filter = years[0]
+        else:
+            year_choice = st.radio(
+                "Год на круговых диаграммах",
+                year_options,
+                horizontal=True,
+                key="area_chart_year",
+            )
+            year_filter = None if year_choice == "Все годы" else year_choice
         scope = report_scope_label(
             records,
             university=university,
@@ -444,7 +458,7 @@ def render_report_block(
         )
         area_rows = area_share_rows(records, year_filter)
         q_rows = quartile_share_rows(records, year_filter)
-        left, right = st.columns(2)
+        left, right = st.columns(2, gap="medium")
         with left:
             if area_rows:
                 png = report_area_png(
@@ -452,33 +466,37 @@ def render_report_block(
                     title=f"{scope} · области знаний",
                 )
                 st.image(png, use_container_width=True)
+        with right:
+            if q_rows:
+                png_q = report_quartile_png(q_rows, title=f"{scope} · квартили SCImago")
+                st.image(png_q, use_container_width=True)
+        dl_left, dl_right = st.columns(2, gap="medium")
+        with dl_left:
+            if area_rows:
                 st.download_button(
                     "Скачать области (PNG)",
                     data=png,
                     file_name="scopus_oblasti.png",
                     mime="image/png",
                     key="download_area_png",
+                    use_container_width=True,
                 )
-                st.caption(
-                    f"{scope}. Основная область журнала в Scopus (ASJC): одна публикация — один сектор. "
-                    "Конференции и книги без ISSN — «Не указано»."
-                )
-        with right:
+        with dl_right:
             if q_rows:
-                png = report_quartile_png(q_rows, title=f"{scope} · квартили SCImago")
-                st.image(png, use_container_width=True)
                 st.download_button(
                     "Скачать квартили (PNG)",
-                    data=png,
+                    data=png_q,
                     file_name="scopus_kvartili.png",
                     mime="image/png",
                     key="download_quartile_png",
+                    use_container_width=True,
                 )
-                st.caption(
-                    f"{scope}. Лучший квартиль журнала SCImago. Если года статьи ещё нет в рейтинге, "
-                    "берётся последний закрытый год."
-                )
-        detail_left, detail_right = st.columns(2)
+        st.caption(
+            f"{scope}. Слева — основная область журнала в Scopus (одна статья — один сектор; "
+            "без ISSN — «Не указано»). Справа — лучший квартиль журнала SCImago; "
+            "если года статьи ещё нет в рейтинге, берётся последний закрытый год."
+        )
+        detail_left, detail_right = st.columns(2, gap="medium")
         with detail_left:
             if area_rows:
                 st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)

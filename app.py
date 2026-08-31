@@ -10,8 +10,9 @@ import requests
 import streamlit as st
 from docx import Document
 
-from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
 from auth import cookie_manager, logout, require_login
+from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
+from report import ReportData, build_report, report_sentence
 
 try:
     from dotenv import load_dotenv
@@ -20,7 +21,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -317,15 +318,51 @@ def build_docx(records: list[dict], fmt: str) -> BytesIO:
     return buf
 
 
-def build_xlsx(records: list[dict]) -> BytesIO:
+def build_xlsx(records: list[dict], report_records: list[dict] | None = None) -> BytesIO:
     df = records_to_dataframe(records)
     df["ГОСТ 7.0.5"] = [format_gost(r) for r in records]
     df["APA 7th"] = [format_apa(r) for r in records]
+    source = report_records if report_records is not None else records
+    report = build_report(source)
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Scopus")
+        if report.year_rows:
+            pd.DataFrame(report.year_rows).to_excel(writer, index=False, sheet_name="Динамика")
+        if report.top_journals:
+            pd.DataFrame(report.top_journals, columns=["Источник", "Публикаций"]).to_excel(
+                writer, index=False, sheet_name="Источники"
+            )
     buf.seek(0)
     return buf
+
+
+def render_report_block(report: ReportData, *, author_mode: bool, has_orcid: bool) -> None:
+    st.subheader("Динамика для отчёта")
+    if author_mode and not has_orcid:
+        st.warning("Поиск по фамилии без ORCID может включать однофамильцев. Для персонального отчёта лучше указать ORCID.")
+    st.write(report_sentence(report))
+    if report.counts:
+        chart_df = pd.DataFrame(
+            {"Публикаций": [report.counts[year] for year in report.counts]},
+            index=[str(year) for year in report.counts],
+        )
+        st.bar_chart(chart_df, use_container_width=True)
+        st.caption("Число документов Scopus по году публикации. Пропуски лет заполнены нулями.")
+    if report.year_rows:
+        st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
+    if report.top_journals:
+        st.caption("Топ источников")
+        st.dataframe(
+            pd.DataFrame(report.top_journals, columns=["Источник", "Публикаций"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+    if report.external_share is not None:
+        st.caption(
+            f"Работ с внешней организацией в аффилиации: {report.external_count} из {report.total} "
+            f"({report.external_share}%)."
+        )
 
 
 st.set_page_config(page_title="Мониторинг публикаций Scopus", layout="wide")
@@ -334,9 +371,18 @@ if not require_login(auth_cookies):
     st.stop()
 
 if st.session_state.get("records_version") != APP_VERSION:
-    st.session_state.pop("records", None)
-    st.session_state.pop("query", None)
-    st.session_state.pop("date_filter", None)
+    for key in (
+        "records",
+        "query",
+        "date_filter",
+        "dynamics_records",
+        "show_report",
+        "search_mode",
+        "author_last",
+        "author_orcid",
+        "only_gasu",
+    ):
+        st.session_state.pop(key, None)
 
 st.title("Мониторинг публикаций Scopus")
 
@@ -442,6 +488,12 @@ if search_clicked:
     st.session_state["date_filter"] = date_filter
     st.session_state["query"] = query
     st.session_state["records_version"] = APP_VERSION
+    st.session_state["search_mode"] = mode
+    st.session_state["author_last"] = author_last
+    st.session_state["author_orcid"] = author_orcid
+    st.session_state["only_gasu"] = only_gasu
+    st.session_state["show_report"] = False
+    st.session_state.pop("dynamics_records", None)
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
@@ -449,11 +501,61 @@ if "records" in st.session_state and st.session_state["records"]:
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
 
     st.subheader("Результаты")
+    slice_report = build_report(records)
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Публикаций в срезе", slice_report.total)
+    kpi2.metric("Охват лет", slice_report.year_label)
+    kpi3.metric("Журналов и изданий", slice_report.unique_journals)
     st.caption(
-        f"Найдено документов: {len(records)}. В список входят только записи, "
-        "где в ответе Scopus видно ГАГУ по названию или городу "
+        "В список входят только записи, где в ответе Scopus видно ГАГУ по названию или городу "
         "(в том числе как одна из нескольких аффилиаций)."
     )
+
+    active_filter = st.session_state.get("date_filter") or {}
+    filter_span = 1
+    if active_filter.get("year_start") and active_filter.get("year_end"):
+        filter_span = int(active_filter["year_end"]) - int(active_filter["year_start"]) + 1
+    can_chart_from_slice = slice_report.distinct_years >= 2 or filter_span >= 2
+
+    if not st.session_state.get("show_report"):
+        if can_chart_from_slice:
+            if st.button("Показать динамику для отчёта"):
+                st.session_state["show_report"] = True
+                st.rerun()
+        elif st.button("Динамика за 5 лет"):
+            if not api_key:
+                st.error("Нужен API-ключ Scopus.")
+            else:
+                last5 = make_date_filter("last5", None, None)
+                dyn_query = build_query(
+                    st.session_state.get("search_mode") or "Мониторинг ГАГУ",
+                    st.session_state.get("author_last") or "",
+                    st.session_state.get("author_orcid") or "",
+                    last5,
+                    bool(st.session_state.get("only_gasu")),
+                )
+                with st.spinner("Строим динамику за 5 лет..."):
+                    try:
+                        st.session_state["dynamics_records"] = fetch_scopus_data(dyn_query, api_key, None)
+                        st.session_state["show_report"] = True
+                        st.rerun()
+                    except Exception as exc:
+                        st.error("Не удалось получить данные за 5 лет.")
+                        st.code(str(exc))
+
+    if st.session_state.get("show_report"):
+        report_source = st.session_state.get("dynamics_records")
+        if report_source is None and can_chart_from_slice:
+            report_source = records
+        if report_source:
+            render_report_block(
+                build_report(report_source),
+                author_mode=(st.session_state.get("search_mode") == "Поиск по автору"),
+                has_orcid=bool(st.session_state.get("author_orcid")),
+            )
+        else:
+            st.info("За этот период публикаций не найдено.")
+
     df = records_to_dataframe(records)
     st.dataframe(df, use_container_width=True)
     if st.session_state.get("query"):
@@ -469,7 +571,7 @@ if "records" in st.session_state and st.session_state["records"]:
     st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
 
     docx_buffer = build_docx(records_for_list, format_choice)
-    xlsx_buffer = build_xlsx(records_for_list)
+    xlsx_buffer = build_xlsx(records_for_list, st.session_state.get("dynamics_records") or records)
 
     col1, col2 = st.columns(2)
     with col1:

@@ -289,6 +289,28 @@ def author_id_query(authid: str, year_start: int, year_end: int) -> str:
     return f"AU-ID({ident}) AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
 
 
+def author_name_query(
+    surname: str,
+    initials: str = "",
+    given: str = "",
+    year_start: int | None = None,
+    year_end: int | None = None,
+) -> str:
+    """Поиск статей человека по фамилии и инициалам, без фильтра ГАГУ."""
+    last = quoted(surname)
+    letters = [ch.upper() for ch in (initials or "") if ch.isalpha()]
+    if not letters:
+        letters = [word[0].upper() for word in (given or "").replace(".", " ").split() if word]
+    query = f"AUTHLAST({last})"
+    if len(letters) >= 2:
+        query += f" AND AUTHFIRST({quoted('.'.join(letters[:2]) + '.')})"
+    elif letters:
+        query += f" AND AUTHFIRST({quoted(letters[0] + '.')})"
+    if year_start is not None and year_end is not None:
+        query += f" AND PUBYEAR > {year_start - 1} AND PUBYEAR < {year_end + 1}"
+    return query
+
+
 def record_has_gasu(record: dict) -> bool:
     for part in (record.get("affiliation") or "").split(";"):
         if is_gasu_name(part):

@@ -241,6 +241,9 @@ def _empty_author_bucket() -> dict:
         "Q3": 0,
         "Q4": 0,
         "none": 0,
+        "surname": "",
+        "given": "",
+        "initials": "",
     }
 
 
@@ -256,9 +259,13 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
     name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
     total = int(bucket.get("total") or bucket["gasu_n"])
     gasu_n = int(bucket["gasu_n"])
+    parts = name.split(None, 1)
     return {
         "Автор": name,
         "authid": bucket.get("authid") or "",
+        "surname": bucket.get("surname") or (parts[0] if parts else ""),
+        "given": bucket.get("given") or "",
+        "initials": bucket.get("initials") or (parts[1] if len(parts) > 1 else ""),
         "Всего Scopus": total,
         "С ГАГУ": gasu_n,
         "Q1": bucket["Q1"],
@@ -317,6 +324,12 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
                 bucket = _empty_author_bucket()
                 buckets[key] = bucket
             bucket["names"][name or (author.get("surname") or "")] += 1
+            if author.get("surname") and not bucket.get("surname"):
+                bucket["surname"] = (author.get("surname") or "").strip()
+            if author.get("given"):
+                bucket["given"] = (author.get("given") or "").strip()
+            if author.get("initials"):
+                bucket["initials"] = (author.get("initials") or "").strip()
             authid = (author.get("authid") or "").strip()
             if authid.isdigit():
                 bucket["authid"] = authid
@@ -332,17 +345,18 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
     return rows
 
 
-def apply_author_total(candidate: dict, total: int) -> dict:
+def apply_author_total(candidate: dict, total: int, account: str = "все статьи автора") -> dict:
     """Число всех статей Scopus в окне (ответ API), без фильтра по аффилиации."""
     known_gasu = int(candidate.get("С ГАГУ") or 0)
     candidate["Всего Scopus"] = max(int(total), known_gasu)
-    candidate["Учёт"] = "все статьи автора"
+    candidate["Учёт"] = account
     return candidate
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
+    hide = {"authid", "surname", "given", "initials"}
     rows = [
-        {k: v for k, v in row.items() if k != "authid"}
+        {k: v for k, v in row.items() if k not in hide}
         for row in candidates
         if int(row.get("Всего Scopus") or 0) >= min_papers
         and not rsf_name_excluded(str(row.get("Автор") or ""))

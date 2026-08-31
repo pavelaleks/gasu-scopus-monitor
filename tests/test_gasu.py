@@ -6,6 +6,7 @@ from gasu import (
     GASU_PREFERRED_NAME,
     author_belongs_to_gasu,
     author_id_query,
+    author_name_query,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
@@ -140,6 +141,10 @@ class MultiAffiliationTests(unittest.TestCase):
             "57202111111",
         )
         self.assertEqual(author_id_query("57202111111", 2021, 2026), "AU-ID(57202111111) AND PUBYEAR > 2020 AND PUBYEAR < 2027")
+        self.assertEqual(
+            author_name_query("Alekseev", "P.V.", year_start=2021, year_end=2026),
+            'AUTHLAST("Alekseev") AND AUTHFIRST("P.V.") AND PUBYEAR > 2020 AND PUBYEAR < 2027',
+        )
         self.assertTrue(record_has_gasu({"affiliation": "Gorno-Altaisk State University; Tomsk State University"}))
         self.assertFalse(record_has_gasu({"affiliation": "Tomsk State University"}))
 

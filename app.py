@@ -14,11 +14,12 @@ from auth import cookie_manager, logout, require_login
 from gasu import (
     GASU_FOUNDED_YEAR,
     author_id_query,
+    author_name_query,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
-    iter_author_items,
-    parse_author_item,
+    is_gasu_city,
+    is_gasu_name,
     parse_authors,
     query_targets_gasu,
 )
@@ -60,14 +61,14 @@ except Exception:
     load_dotenv = None
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
-ABSTRACT_URL = "https://api.elsevier.com/content/abstract/scopus_id/{sid}"
+AUTHOR_URL = "https://api.elsevier.com/content/search/author"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
     "prism:doi,prism:volume,prism:issueIdentifier,prism:pageRange,"
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -271,69 +272,62 @@ def fetch_scopus_total(query: str, api_key: str) -> int:
     return int((payload.get("search-results") or {}).get("opensearch:totalResults") or 0)
 
 
-def _abstract_scopus_id(raw: str) -> str:
-    text = (raw or "").replace("SCOPUS_ID:", "").strip()
-    if text.isdigit():
-        return f"2-s2.0-{text}"
-    return text
+def _author_id_from_entry(entry: dict) -> str:
+    ident = str(entry.get("dc:identifier") or "")
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    return digits if len(digits) >= 6 else ""
 
 
-def fetch_abstract_authors(scopus_id: str, api_key: str) -> list[dict]:
-    sid = _abstract_scopus_id(scopus_id)
-    if not sid:
-        return []
+def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str) -> str:
+    if not (surname or "").strip():
+        return ""
+    query = author_name_query(surname, initials, given)
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
-    url = ABSTRACT_URL.format(sid=sid)
-    last_error = None
-    response = None
-    for attempt in range(3):
-        try:
-            response = requests.get(url, headers=headers, timeout=45)
-            last_error = None
-            break
-        except requests.RequestException as exc:
-            last_error = exc
-            time.sleep(1.2 * (attempt + 1))
-    if last_error or response is None or response.status_code != 200:
-        return []
+    try:
+        response = requests.get(
+            AUTHOR_URL,
+            headers=headers,
+            params={"query": query, "count": 15, "start": 0},
+            timeout=45,
+        )
+    except requests.RequestException:
+        return ""
+    if response.status_code != 200:
+        return ""
     try:
         payload = response.json()
     except Exception:
-        return []
-    authors = []
-    seen: set[str] = set()
-    for item in iter_author_items(payload):
-        parsed = parse_author_item(item)
-        if not parsed:
+        return ""
+    entries = (payload.get("search-results") or {}).get("entry") or []
+    if isinstance(entries, dict):
+        entries = [entries]
+    gasu_id = ""
+    any_id = ""
+    matches = 0
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("error"):
             continue
-        key = parsed.get("authid") or f"{parsed.get('surname')}|{parsed.get('given')}"
-        if key in seen:
+        authid = _author_id_from_entry(entry)
+        if not authid:
             continue
-        seen.add(key)
-        authors.append(parsed)
-    return authors
-
-
-def records_need_author_enrichment(records: list[dict]) -> bool:
-    authors = [author for rec in records for author in rec.get("authors") or []]
-    if not authors:
-        return True
-    with_id = sum(1 for author in authors if author.get("authid"))
-    multi = sum(1 for rec in records if len(rec.get("authors") or []) > 1)
-    return with_id < max(1, len(authors) // 2) or multi < max(1, len(records) // 3)
-
-
-def enrich_record_authors(records: list[dict], api_key: str) -> int:
-    updated = 0
-    for rec in records:
-        current = rec.get("authors") or []
-        if any(author.get("authid") for author in current) and len(current) > 1:
-            continue
-        fetched = fetch_abstract_authors(rec.get("scopus_id") or "", api_key)
-        if fetched:
-            rec["authors"] = fetched
-            updated += 1
-    return updated
+        matches += 1
+        if not any_id:
+            any_id = authid
+        aff = entry.get("affiliation-current") or {}
+        if isinstance(aff, list):
+            aff = aff[0] if aff else {}
+        if not isinstance(aff, dict):
+            aff = {}
+        name = str(aff.get("affiliation-name") or aff.get("affilname") or "")
+        city = str(aff.get("affiliation-city") or "")
+        if is_gasu_name(name) or is_gasu_city(city):
+            gasu_id = authid
+            break
+    if gasu_id:
+        return gasu_id
+    if matches == 1:
+        return any_id
+    return ""
 
 
 def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list[dict]:
@@ -403,21 +397,42 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
     return records
 
 
-def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple[list[dict], int]:
+def expand_rsf_candidates(candidates: list[dict], window, api_key: str) -> tuple[list[dict], int, int]:
     expanded = []
     failed = 0
+    named = 0
     for cand in candidates:
         row = dict(cand)
         authid = (cand.get("authid") or "").strip()
-        if authid:
-            query = author_id_query(authid, window.from_year, window.to_year)
-            try:
+        if not authid:
+            authid = resolve_scopus_authid(
+                cand.get("surname") or "",
+                cand.get("initials") or "",
+                cand.get("given") or "",
+                api_key,
+            )
+            if authid:
+                row["authid"] = authid
+        try:
+            if authid:
+                query = author_id_query(authid, window.from_year, window.to_year)
                 total = fetch_scopus_total(query, api_key)
-                apply_author_total(row, total)
-            except Exception:
-                failed += 1
+                apply_author_total(row, total, "все статьи автора")
+            else:
+                query = author_name_query(
+                    cand.get("surname") or "",
+                    cand.get("initials") or "",
+                    cand.get("given") or "",
+                    window.from_year,
+                    window.to_year,
+                )
+                total = fetch_scopus_total(query, api_key)
+                apply_author_total(row, total, "по фамилии и инициалам")
+                named += 1
+        except Exception:
+            failed += 1
         expanded.append(row)
-    return expanded, failed
+    return expanded, failed, named
 
 
 def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
@@ -660,6 +675,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_failed",
         "grant_with_id",
         "grant_people",
+        "grant_named",
     ):
         st.session_state.pop(key, None)
 
@@ -805,9 +821,6 @@ if search_clicked:
             st.stop()
     if records and grant_min:
         records = [rec for rec in records if record_in_rsf_window(rec, window)]
-        if records_need_author_enrichment(records):
-            with st.spinner("В краткой выдаче Scopus нет соавторов — добираем авторов каждой статьи..."):
-                enrich_record_authors(records, api_key)
         for rec in records:
             rec.setdefault("subject_abbrevs", [])
             rec.setdefault("subject_areas", "Не указано")
@@ -850,15 +863,13 @@ if search_clicked:
         st.session_state["grant_contest_year"] = window.contest_year
         st.session_state["grant_from_year"] = window.from_year
         candidates = rsf_candidates(records)
-        with_id = sum(1 for cand in candidates if cand.get("authid"))
-        with st.spinner(
-            "Уточняем число всех статей Scopus по Author ID, без фильтра по аффилиации..."
-        ):
-            expanded, failed = expand_rsf_candidates(candidates, window, api_key)
+        with st.spinner("Считаем все статьи Scopus каждого автора за окно РНФ..."):
+            expanded, failed, named = expand_rsf_candidates(candidates, window, api_key)
         st.session_state["grant_rows"] = rsf_eligibility_rows(expanded, grant_min)
         st.session_state["grant_failed"] = failed
-        st.session_state["grant_with_id"] = with_id
+        st.session_state["grant_named"] = named
         st.session_state["grant_people"] = len(candidates)
+        st.session_state["grant_with_id"] = sum(1 for cand in expanded if cand.get("authid"))
     else:
         st.session_state.pop("grant_min", None)
         st.session_state.pop("grant_contest_year", None)
@@ -867,6 +878,7 @@ if search_clicked:
         st.session_state.pop("grant_failed", None)
         st.session_state.pop("grant_with_id", None)
         st.session_state.pop("grant_people", None)
+        st.session_state.pop("grant_named", None)
 
 if "records" in st.session_state and st.session_state["records"]:
     records = st.session_state["records"]
@@ -893,20 +905,23 @@ if "records" in st.session_state and st.session_state["records"]:
         failed = int(st.session_state.get("grant_failed") or 0)
         with_id = int(st.session_state.get("grant_with_id") or 0)
         people = int(st.session_state.get("grant_people") or 0)
-        if people and with_id == 0:
-            st.warning(
-                "Scopus не отдал Author ID. Порог посчитан только по статьям с ГАГУ, "
-                "поэтому соавторы вроде Алексеева могут не набрать 8."
-            )
+        named = int(st.session_state.get("grant_named") or 0)
+        counted = with_id + named
+        if people and counted == 0:
+            st.warning("Не удалось посчитать полный Scopus ни у одного автора. Показаны только статьи с ГАГУ.")
         st.caption(
-            "В список попадает каждый автор статей ГАГУ в этом окне — без фильтра по его личной "
-            "аффилиации в карточке Scopus. Порог считается по всем его статьям Scopus "
-            "(запрос AU-ID), столбец «С ГАГУ» показывает, сколько из них с университетом. "
-            "Совместитель и внешний соавтор тоже могут оказаться в таблице: смотрите оба числа. "
-            "Если у человека нет Author ID, остаётся только счётчик статей с ГАГУ. "
+            "Порог — все статьи Scopus автора за окно, не только с ГАГУ. "
+            "Связь с вузом: есть хотя бы одна статья ГАГУ. "
+            "Если Scopus не даёт Author ID, считаем AUTHLAST + инициалы "
+            "(однофамильцы возможны). Совместитель тоже может попасть — смотрите «С ГАГУ». "
             "Это оценка для мониторинга, не экспертиза заявки."
-            + (f" Полный Scopus уточнён у {with_id} из {people} авторов." if people else "")
-            + (f" Не удалось уточнить полный список у {failed} авторов." if failed else "")
+            + (
+                f" Полный список посчитан у {counted} из {people} авторов"
+                + (f" ({named} по фамилии)." if named else ".")
+                if people
+                else ""
+            )
+            + (f" Ошибки запроса: {failed}." if failed else "")
         )
 
     st.subheader("Результаты")

@@ -315,15 +315,18 @@ def author_profile_query(
     given: str = "",
     *,
     with_initial: bool | None = None,
+    gasu_only: bool = True,
 ) -> str:
-    """Поиск профиля автора: фамилия + ГАГУ, при возможности первая буква имени."""
+    """Поиск профиля: фамилия, при необходимости первая буква имени и аффилиация ГАГУ."""
     query = f"AUTHLAST({quoted(surname)})"
     initial = first_initial(initials, given)
     if with_initial is None:
         with_initial = bool(initial)
     if with_initial and initial:
         query += f" AND AUTHFIRST({initial})"
-    return f"{query} AND {gasu_author_affil_clause()}"
+    if gasu_only:
+        query += f" AND {gasu_author_affil_clause()}"
+    return query
 
 
 def author_papers_query(authid: str, date_filter: dict | None, only_gasu: bool) -> str:

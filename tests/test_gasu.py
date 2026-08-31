@@ -153,6 +153,9 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertIn("AUTHFIRST(P)", profile)
         self.assertIn("AFFIL(", profile)
         self.assertNotIn("AUTH(", profile.replace("AUTHLAST", "").replace("AUTHFIRST", ""))
+        open_query = author_profile_query("Alekseev", "P.V.", gasu_only=False)
+        self.assertIn('AUTHLAST("Alekseev")', open_query)
+        self.assertNotIn("AFFIL(", open_query)
         papers = author_papers_query(
             "57202111111",
             {"mode": "range", "year_start": 2021, "year_end": 2026},

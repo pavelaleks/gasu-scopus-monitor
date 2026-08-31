@@ -78,8 +78,25 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 APP_UPDATED_FALLBACK = "29.08.2026"
+MODE_UNIVERSITY = "Мониторинг ГАГУ"
+MODE_AUTHOR = "Поиск по автору"
+GRANT_STATE_KEYS = (
+    "grant_min",
+    "grant_contest_year",
+    "grant_from_year",
+    "grant_rows",
+    "grant_failed",
+    "grant_with_id",
+    "grant_people",
+    "grant_named",
+)
+
+
+def clear_grant_state() -> None:
+    for key in GRANT_STATE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def last_updated_label() -> str:
@@ -305,12 +322,21 @@ def _author_search_entries(query: str, api_key: str) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def resolve_author_profile(surname: str, initials: str, given: str, api_key: str) -> dict:
+def resolve_author_profile(
+    surname: str,
+    initials: str,
+    given: str,
+    api_key: str,
+    *,
+    gasu_only: bool = True,
+) -> dict:
     if not (surname or "").strip():
         return {}
-    queries = [author_profile_query(surname, initials, given)]
+    queries = [author_profile_query(surname, initials, given, gasu_only=gasu_only)]
     if first_initial(initials, given):
-        queries.append(author_profile_query(surname, initials, given, with_initial=False))
+        queries.append(
+            author_profile_query(surname, initials, given, with_initial=False, gasu_only=gasu_only)
+        )
     seen: set[str] = set()
     for query in queries:
         if query in seen:
@@ -852,6 +878,8 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_with_id",
         "grant_people",
         "grant_named",
+        "target_profile",
+        "author_identity",
     ):
         st.session_state.pop(key, None)
 
@@ -893,47 +921,61 @@ with st.sidebar:
         if max_year:
             st.caption(f"В файле рейтинги журналов по {max_year} год включительно.")
 
-st.caption(
-    "Мониторинг ГАГУ включает статьи, где университет указан хотя бы как одна из "
-    "аффилиаций (в том числе вместе с другими организациями)."
+mode = st.radio(
+    "Режим поиска",
+    [MODE_UNIVERSITY, MODE_AUTHOR],
+    horizontal=True,
+    key="ui_mode",
 )
 
 window = rsf_window()
-quick1, quick2, quick3 = st.columns(3)
-with quick1:
-    quick_check = st.button(
-        "Статьи ГАГУ за текущий год",
-        type="primary",
-        use_container_width=True,
-        key="quick_year",
-    )
-with quick2:
-    quick_rsf8 = st.button(
-        f"РНФ {window.contest_year}, от 8 статей",
-        use_container_width=True,
-        key="quick_rsf8",
-    )
-with quick3:
-    quick_rsf5 = st.button(
-        f"РНФ {window.contest_year}, от 5 статей",
-        use_container_width=True,
-        key="quick_rsf5",
-    )
-st.caption(
-    f"РНФ: ближайший конкурс — {window.contest_year} год. "
-    f"Порог считается по всем статьям Scopus автора с {window.from_label}, а не только с аффилиацией ГАГУ. "
-    "В список попадают люди, у которых в этом окне есть хотя бы одна статья с ГАГУ. "
-    "Штат или совместительство Scopus не показывает."
-)
-
-mode = st.radio("Режим поиска", ["Мониторинг ГАГУ", "Поиск по автору"], horizontal=True)
-
+quick_check = False
+quick_rsf8 = False
+quick_rsf5 = False
 author_last = ""
 author_orcid = ""
+author_scopus_id = ""
 only_gasu = False
-if mode == "Поиск по автору":
-    author_last = st.text_input("Фамилия автора")
+
+if mode == MODE_UNIVERSITY:
+    st.caption(
+        "Мониторинг ГАГУ включает статьи, где университет указан хотя бы как одна из "
+        "аффилиаций (в том числе вместе с другими организациями)."
+    )
+    quick1, quick2, quick3 = st.columns(3)
+    with quick1:
+        quick_check = st.button(
+            "Статьи ГАГУ за текущий год",
+            type="primary",
+            use_container_width=True,
+            key="quick_year",
+        )
+    with quick2:
+        quick_rsf8 = st.button(
+            f"РНФ {window.contest_year}, от 8 статей",
+            use_container_width=True,
+            key="quick_rsf8",
+        )
+    with quick3:
+        quick_rsf5 = st.button(
+            f"РНФ {window.contest_year}, от 5 статей",
+            use_container_width=True,
+            key="quick_rsf5",
+        )
+    st.caption(
+        f"РНФ: ближайший конкурс — {window.contest_year} год. "
+        f"Порог считается по всем статьям Scopus автора с {window.from_label}, а не только с аффилиацией ГАГУ. "
+        "В список попадают люди, у которых в этом окне есть хотя бы одна статья с ГАГУ. "
+        "Штат или совместительство Scopus не показывает."
+    )
+else:
+    st.caption(
+        "Публикации одного человека. РНФ и список грантодержателей здесь не строятся. "
+        "Надёжнее ORCID или Scopus Author ID; фамилия без них может дать однофамильцев."
+    )
+    author_last = st.text_input("Фамилия")
     author_orcid = st.text_input("ORCID (если есть)")
+    author_scopus_id = st.text_input("Scopus Author ID (если есть)", placeholder="58102647800")
     only_gasu = st.checkbox("Только аффилиация ГАГУ", value=False)
 
 time_filter = st.radio(
@@ -954,11 +996,11 @@ search_clicked = st.button("Найти публикации")
 grant_min = None
 
 if quick_check:
-    mode = "Мониторинг ГАГУ"
+    mode = MODE_UNIVERSITY
     time_filter = "Текущий год"
     search_clicked = True
 elif quick_rsf8 or quick_rsf5:
-    mode = "Мониторинг ГАГУ"
+    mode = MODE_UNIVERSITY
     time_filter = "РНФ"
     grant_min = 8 if quick_rsf8 else 5
     search_clicked = True
@@ -984,23 +1026,45 @@ if search_clicked:
     if not api_key:
         st.error("Нужен API-ключ Scopus. Введите его в боковой панели.")
         st.stop()
-    if mode == "Поиск по автору" and not author_orcid and not author_last:
-        st.error("Для поиска по автору укажите фамилию или ORCID.")
+    author_id_digits = "".join(ch for ch in (author_scopus_id or "") if ch.isdigit())
+    if mode == MODE_AUTHOR and not author_orcid and not author_last and not author_id_digits:
+        st.error("Для поиска по автору укажите фамилию, ORCID или Scopus Author ID.")
         st.stop()
+    if not grant_min:
+        clear_grant_state()
     identity = "university"
-    if mode == "Поиск по автору":
-        if author_orcid:
+    target_profile: dict = {}
+    if mode == MODE_AUTHOR:
+        if author_id_digits:
+            identity = "au-id"
+            query = author_papers_query(author_id_digits, date_filter, only_gasu)
+            target_profile = {"authid": author_id_digits}
+        elif author_orcid:
             identity = "orcid"
             query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
+            orcid_entries = _author_search_entries(f'ORCID("{author_orcid.strip()}")', api_key)
+            if len(orcid_entries) == 1:
+                target_profile = parse_author_search_profile(orcid_entries[0])
         else:
             with st.spinner("Ищем профиль автора в Scopus..."):
-                authid = resolve_scopus_authid(author_last, "", "", api_key)
+                target_profile = resolve_author_profile(
+                    author_last,
+                    "",
+                    "",
+                    api_key,
+                    gasu_only=only_gasu,
+                )
+            authid = (target_profile.get("authid") or "").strip()
             if authid:
                 identity = "au-id"
                 query = author_papers_query(authid, date_filter, only_gasu)
             else:
                 identity = "surname"
                 query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
+        if target_profile.get("authid"):
+            extra = fetch_author_metrics(target_profile["authid"], api_key)
+            if extra:
+                apply_author_profile(target_profile, extra)
     else:
         query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
     with st.spinner("Идет поиск в Scopus..."):
@@ -1036,13 +1100,21 @@ if search_clicked:
                     rec.setdefault("scimago_quartile", "Нет")
 
     if not records:
+        st.session_state.pop("records", None)
+        st.session_state.pop("target_profile", None)
+        if not grant_min:
+            clear_grant_state()
         st.info("Статей по данному запросу не найдено.")
         st.stop()
 
-    with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
-        enrich_record_authors(records, api_key)
-    with st.spinner("Загружаем профили Scopus: Author ID, ORCID, h-индекс..."):
-        stamp_author_profiles(records, api_key)
+    if mode == MODE_UNIVERSITY:
+        with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
+            enrich_record_authors(records, api_key)
+        with st.spinner("Загружаем профили Scopus: Author ID, ORCID, h-индекс..."):
+            stamp_author_profiles(records, api_key)
+        st.session_state.pop("target_profile", None)
+    else:
+        st.session_state["target_profile"] = target_profile
 
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
@@ -1072,20 +1144,20 @@ if search_clicked:
         st.session_state["grant_named"] = counted
         st.session_state["grant_with_id"] = sum(1 for cand in expanded if cand.get("authid"))
     else:
-        st.session_state.pop("grant_min", None)
-        st.session_state.pop("grant_contest_year", None)
-        st.session_state.pop("grant_from_year", None)
-        st.session_state.pop("grant_rows", None)
-        st.session_state.pop("grant_failed", None)
-        st.session_state.pop("grant_with_id", None)
-        st.session_state.pop("grant_people", None)
-        st.session_state.pop("grant_named", None)
+        clear_grant_state()
 
 if "records" in st.session_state and st.session_state["records"]:
+    saved_mode = st.session_state.get("search_mode") or MODE_UNIVERSITY
+    if saved_mode != mode:
+        st.info(
+            "Сейчас выбран другой режим, чем в прошлой выдаче. "
+            "Нажмите «Найти публикации», чтобы выполнить поиск заново."
+        )
+        st.stop()
     records = st.session_state["records"]
     active_date_filter = st.session_state.get("date_filter")
     records_for_list = sort_records_for_bibliography(records, active_date_filter)
-    grant_min_saved = st.session_state.get("grant_min")
+    grant_min_saved = st.session_state.get("grant_min") if saved_mode == MODE_UNIVERSITY else None
     grant_rows: list[dict] = list(st.session_state.get("grant_rows") or [])
     if grant_min_saved:
         contest = st.session_state.get("grant_contest_year")
@@ -1127,16 +1199,38 @@ if "records" in st.session_state and st.session_state["records"]:
             + (f" Ошибки запроса: {failed}." if failed else "")
         )
 
+    profile = st.session_state.get("target_profile") or {}
+    if saved_mode == MODE_AUTHOR and (profile.get("authid") or profile.get("orcid")):
+        st.subheader("Профиль автора")
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Author ID", profile.get("authid") or "—")
+        p2.metric("h-индекс", "—" if profile.get("h_index") is None else str(profile.get("h_index")))
+        p3.metric("Документов", "—" if profile.get("documents") is None else str(profile.get("documents")))
+        p4.metric("Цитирований", "—" if profile.get("cited_by") is None else str(profile.get("cited_by")))
+        p5.metric("ORCID", profile.get("orcid") or "—")
+        if profile.get("profile_affil"):
+            st.caption(profile["profile_affil"])
+
     st.subheader("Результаты")
     slice_report = build_report(records)
     kpi1, kpi2, kpi3 = st.columns(3)
     kpi1.metric("Публикаций в срезе", slice_report.total)
     kpi2.metric("Охват лет", slice_report.year_label)
     kpi3.metric("Журналов и изданий", slice_report.unique_journals)
-    st.caption(
-        "В список входят только записи, где в ответе Scopus видно ГАГУ по названию или городу "
-        "(в том числе как одна из нескольких аффилиаций)."
-    )
+    if saved_mode == MODE_AUTHOR:
+        st.caption(
+            "Список — работы выбранного автора за указанный период. "
+            + (
+                "Показаны только записи с аффилиацией ГАГУ."
+                if st.session_state.get("only_gasu")
+                else "Фильтр «только ГАГУ» выключен: аффилиация не ограничивается университетом."
+            )
+        )
+    else:
+        st.caption(
+            "В список входят только записи, где в ответе Scopus видно ГАГУ по названию или городу "
+            "(в том числе как одна из нескольких аффилиаций)."
+        )
 
     active_filter = st.session_state.get("date_filter") or {}
     filter_span = 1
@@ -1222,8 +1316,8 @@ if "records" in st.session_state and st.session_state["records"]:
     xlsx_buffer = build_xlsx(
         records_for_list,
         st.session_state.get("dynamics_records") or records,
-        university=(st.session_state.get("search_mode") != "Поиск по автору"),
-        grant_rows=grant_rows or None,
+        university=(saved_mode == MODE_UNIVERSITY),
+        grant_rows=grant_rows if grant_min_saved else None,
     )
 
     col1, col2 = st.columns(2)

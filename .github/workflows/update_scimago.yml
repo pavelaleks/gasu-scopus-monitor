@@ -36,7 +36,7 @@ jobs:
 
       - name: Commit lookup if it changed
         run: |
-          git add data/scimago_issn.parquet
+          git add data/scimago_issn.parquet data/scimago_meta.json
           if git diff --staged --quiet; then
             echo "SCImago lookup is unchanged."
             exit 0

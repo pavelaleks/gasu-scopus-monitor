@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -11,9 +13,11 @@ from subjects import normalize_issn
 
 DATA_DIR = Path(__file__).with_name("data")
 SLIM_PATH = DATA_DIR / "scimago_issn.parquet"
+META_PATH = DATA_DIR / "scimago_meta.json"
 RDA_URL = "https://github.com/ikashnitsky/sjrdata/raw/refs/heads/master/data/sjr_journals.rda"
 RDA_PATH = DATA_DIR / "sjr_journals.rda"
 MIN_YEAR = 2018
+REFRESH_MONTH_DAYS = ((6, 20), (12, 20))
 QUARTILES = ("Q1", "Q2", "Q3", "Q4")
 UNKNOWN_QUARTILE = "Нет"
 
@@ -128,7 +132,58 @@ def load_slim(path: Path = SLIM_PATH) -> pd.DataFrame:
 def save_slim(frame: pd.DataFrame, path: Path = SLIM_PATH) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False)
+    max_year = int(frame["year"].max()) if not frame.empty else 0
+    META_PATH.write_text(
+        json.dumps(
+            {
+                "built_at": datetime.now(timezone.utc).date().isoformat(),
+                "max_year": max_year,
+                "source": "sjrdata",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return path
+
+
+def load_meta() -> dict:
+    if META_PATH.exists():
+        try:
+            payload = json.loads(META_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def next_refresh_date(today: date | None = None) -> date:
+    today = today or date.today()
+    for month, day in REFRESH_MONTH_DAYS:
+        candidate = date(today.year, month, day)
+        if candidate > today:
+            return candidate
+    month, day = REFRESH_MONTH_DAYS[0]
+    return date(today.year + 1, month, day)
+
+
+def format_ru_date(value: date | None) -> str:
+    if value is None:
+        return "—"
+    return value.strftime("%d.%m.%Y")
+
+
+def lookup_built_on() -> date | None:
+    raw = str(load_meta().get("built_at") or "")[:10]
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return None
 
 
 def download_rda(url: str = RDA_URL, dest: Path = RDA_PATH) -> Path:

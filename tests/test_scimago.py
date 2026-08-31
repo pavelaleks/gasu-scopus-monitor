@@ -2,11 +2,14 @@ import unittest
 
 import pandas as pd
 
+from datetime import date
+
 from scimago import (
     UNKNOWN_QUARTILE,
     ScimagoIndex,
     attach_scimago,
     format_quartile_cell,
+    next_refresh_date,
     quartile_share_rows,
     slim_from_frame,
     split_issns,
@@ -68,6 +71,11 @@ class ScimagoTests(unittest.TestCase):
         self.assertEqual(set(slim["issn"]), {"12345678", "87654321"})
         self.assertEqual(slim["quartile"].iloc[0], "Q1")
         self.assertEqual(slim["sjr"].iloc[0], 1.234)
+
+    def test_next_refresh_date(self):
+        self.assertEqual(next_refresh_date(date(2026, 8, 31)), date(2026, 12, 20))
+        self.assertEqual(next_refresh_date(date(2026, 12, 20)), date(2027, 6, 20))
+        self.assertEqual(next_refresh_date(date(2026, 6, 19)), date(2026, 6, 20))
 
 
 if __name__ == "__main__":

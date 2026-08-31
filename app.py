@@ -13,8 +13,22 @@ from docx import Document
 from auth import cookie_manager, logout, require_login
 from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
 from report import ReportData, build_report, report_area_png, report_chart_png, report_quartile_png, report_sentence
-from scimago import attach_scimago, format_quartile_cell, get_index, quartile_share_rows
-from subjects import area_share_rows, attach_subject_areas, extract_issns, grouped_area_counts
+from scimago import (
+    attach_scimago,
+    format_quartile_cell,
+    format_ru_date,
+    load_meta,
+    lookup_built_on,
+    next_refresh_date,
+    quartile_share_rows,
+)
+from subjects import (
+    area_share_rows,
+    attach_subject_areas,
+    extract_issns,
+    fetch_serial_abbrevs,
+    grouped_area_counts,
+)
 
 try:
     from dotenv import load_dotenv
@@ -23,7 +37,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -193,6 +207,29 @@ def make_date_filter(mode: str, start_year: int | None, end_year: int | None) ->
     if mode == "range" and start_year and end_year:
         return {"mode": "range", "year": start_year, "year_start": start_year, "year_end": end_year}
     return None
+
+
+@st.cache_data(ttl=60 * 60 * 24 * 30, show_spinner=False)
+def cached_serial_abbrevs(issn: str, api_key: str) -> tuple[list[str], int]:
+    return fetch_serial_abbrevs(issn, api_key)
+
+
+@st.cache_resource
+def journal_memory() -> dict:
+    return {"issn": {}}
+
+
+def fill_subject_areas(records: list[dict], api_key: str) -> None:
+    memory = journal_memory()
+    cache = st.session_state.setdefault("issn_subject_cache", {})
+    cache.update(memory["issn"])
+    attach_subject_areas(
+        records,
+        api_key,
+        cache,
+        fetch=cached_serial_abbrevs,
+    )
+    memory["issn"].update(cache)
 
 
 def _scopus_get(headers: dict, params: dict) -> requests.Response:
@@ -468,6 +505,15 @@ with st.sidebar:
     else:
         st.success("API-ключ найден.")
         st.caption("Ключ берётся из Secrets (Cloud) или из `.env` (локально). Пользователи его не вводят.")
+        built = lookup_built_on()
+        nxt = next_refresh_date()
+        max_year = load_meta().get("max_year")
+        st.caption(
+            f"Справочник квартилей SCImago обновлён {format_ru_date(built)}. "
+            f"Следующее автообновление: {format_ru_date(nxt)}."
+        )
+        if max_year:
+            st.caption(f"В файле рейтинги журналов по {max_year} год включительно.")
 
 st.markdown("Нажмите кнопку для быстрого мониторинга или выберите режим поиска.")
 st.caption(
@@ -538,11 +584,7 @@ if search_clicked:
     if records:
         with st.spinner("Определяем области знаний по журналам Scopus..."):
             try:
-                attach_subject_areas(
-                    records,
-                    api_key,
-                    st.session_state.setdefault("issn_subject_cache", {}),
-                )
+                fill_subject_areas(records, api_key)
             except Exception:
                 for rec in records:
                     rec.setdefault("subject_abbrevs", [])
@@ -612,11 +654,7 @@ if "records" in st.session_state and st.session_state["records"]:
                     try:
                         dyn_records = fetch_scopus_data(dyn_query, api_key, None)
                         try:
-                            attach_subject_areas(
-                                dyn_records,
-                                api_key,
-                                st.session_state.setdefault("issn_subject_cache", {}),
-                            )
+                            fill_subject_areas(dyn_records, api_key)
                         except Exception:
                             for rec in dyn_records:
                                 rec.setdefault("subject_abbrevs", [])
@@ -651,7 +689,7 @@ if "records" in st.session_state and st.session_state["records"]:
     st.dataframe(df, use_container_width=True)
     st.caption(
         "Квартиль — лучший квартиль журнала в SCImago. Если у статьи год новее рейтинга, в скобках указан год SJR "
-        f"(сейчас до {get_index().max_year or '—'}). Это не оценка текста статьи."
+        f"(сейчас до {load_meta().get('max_year') or '—'}). Это не оценка текста статьи."
     )
     if st.session_state.get("query"):
         with st.expander("Запрос Scopus"):

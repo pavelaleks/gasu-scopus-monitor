@@ -151,11 +151,69 @@ def build_report_figure(report: ReportData):
     return fig
 
 
-def report_chart_png(report: ReportData) -> bytes:
+def _save_figure_png(fig) -> bytes:
     import matplotlib.pyplot as plt
 
-    fig = build_report_figure(report)
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return buf.getvalue()
+
+
+def report_chart_png(report: ReportData) -> bytes:
+    return _save_figure_png(build_report_figure(report))
+
+
+DONUT_COLORS = [
+    "#3d5a80",
+    "#ee6c4d",
+    "#98c1d9",
+    "#6a994e",
+    "#f2cc8f",
+    "#bc4749",
+    "#81b29a",
+    "#293241",
+    "#e07a5f",
+    "#e0fbfc",
+]
+
+
+def build_area_figure(slices: list[tuple[str, int]], title: str = "Области знаний Scopus"):
+    import matplotlib.pyplot as plt
+
+    values = [count for _, count in slices]
+    total = sum(values)
+    fig, ax = plt.subplots(figsize=(6.4, 2.8), dpi=120)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+    if not total:
+        ax.text(0.5, 0.5, "Нет данных", ha="center", va="center")
+        ax.set_axis_off()
+        fig.tight_layout(pad=0.4)
+        return fig
+    colors = [DONUT_COLORS[i % len(DONUT_COLORS)] for i in range(len(values))]
+    ax.pie(
+        values,
+        colors=colors,
+        startangle=90,
+        wedgeprops={"width": 0.48, "edgecolor": "white", "linewidth": 1.2},
+    )
+    legend = []
+    for name, count in slices:
+        pct = round(count / total * 100)
+        legend.append(f"{name} — {count} ({pct}%)")
+    ax.legend(
+        legend,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        fontsize=8,
+        labelspacing=0.45,
+    )
+    ax.set_title(title, fontsize=11, pad=8)
+    fig.tight_layout(pad=0.35)
+    return fig
+
+
+def report_area_png(slices: list[tuple[str, int]], title: str = "Области знаний Scopus") -> bytes:
+    return _save_figure_png(build_area_figure(slices, title=title))

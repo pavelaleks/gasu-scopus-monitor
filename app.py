@@ -12,7 +12,8 @@ from docx import Document
 
 from auth import cookie_manager, logout, require_login
 from gasu import build_query, entry_belongs_to_gasu, format_affiliations, query_targets_gasu
-from report import ReportData, build_report, report_chart_png, report_sentence
+from report import ReportData, build_report, report_area_png, report_chart_png, report_sentence
+from subjects import area_share_rows, attach_subject_areas, extract_issns, grouped_area_counts
 
 try:
     from dotenv import load_dotenv
@@ -21,7 +22,7 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 APP_UPDATED_FALLBACK = "29.08.2026"
 
 
@@ -255,6 +256,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                     "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                     "authors": parse_authors(entry),
                     "affiliation": format_affiliations(entry),
+                    "issns": extract_issns(entry),
                 }
             )
             if max_results and len(records) >= max_results:
@@ -278,6 +280,7 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
                 "Журнал": rec["journal"],
                 "Авторы": format_authors_gost(rec["authors"]),
                 "Организации": rec.get("affiliation", ""),
+                "Область знаний": rec.get("subject_areas") or "",
                 "DOI": rec["doi"],
                 "Scopus ID": rec["scopus_id"],
             }
@@ -333,11 +336,14 @@ def build_xlsx(records: list[dict], report_records: list[dict] | None = None) ->
             pd.DataFrame(report.top_journals, columns=["Источник", "Публикаций"]).to_excel(
                 writer, index=False, sheet_name="Источники"
             )
+        area_rows = area_share_rows(source)
+        if area_rows:
+            pd.DataFrame(area_rows).to_excel(writer, index=False, sheet_name="Области знаний")
     buf.seek(0)
     return buf
 
 
-def render_report_block(report: ReportData, *, author_mode: bool, has_orcid: bool) -> None:
+def render_report_block(report: ReportData, records: list[dict], *, author_mode: bool, has_orcid: bool) -> None:
     st.subheader("Динамика для отчёта")
     if author_mode and not has_orcid:
         st.warning("Поиск по фамилии без ORCID может включать однофамильцев. Для персонального отчёта лучше указать ORCID.")
@@ -350,10 +356,32 @@ def render_report_block(report: ReportData, *, author_mode: bool, has_orcid: boo
             data=png,
             file_name="scopus_dinamika.png",
             mime="image/png",
+            key="download_year_png",
         )
         st.caption("По году публикации. Годы без работ показаны как 0. Год к году — в таблице ниже.")
     if report.year_rows:
         st.dataframe(pd.DataFrame(report.year_rows), hide_index=True, use_container_width=True)
+    years = sorted({str(rec.get("year")) for rec in records if str(rec.get("year") or "").isdigit()})
+    if years:
+        area_choice = st.selectbox("Области знаний за", ["Весь период", *years], key="area_chart_year")
+        year_filter = None if area_choice == "Весь период" else area_choice
+        area_rows = area_share_rows(records, year_filter)
+        if area_rows:
+            title = "Области знаний Scopus" if year_filter is None else f"Области знаний Scopus, {year_filter}"
+            png = report_area_png(grouped_area_counts(area_rows), title=title)
+            st.image(png, width=560)
+            st.download_button(
+                "Скачать диаграмму областей (PNG)",
+                data=png,
+                file_name="scopus_oblasti.png",
+                mime="image/png",
+                key="download_area_png",
+            )
+            st.caption(
+                "По основной области журнала в классификации Scopus. В таблице публикаций указаны все области издания. "
+                "Конференции и книги без ISSN — «Не указано»."
+            )
+            st.dataframe(pd.DataFrame(area_rows), hide_index=True, use_container_width=True)
     if report.top_journals:
         st.caption("Топ источников")
         st.dataframe(
@@ -384,6 +412,8 @@ if st.session_state.get("records_version") != APP_VERSION:
         "author_last",
         "author_orcid",
         "only_gasu",
+        "issn_subject_cache",
+        "area_chart_year",
     ):
         st.session_state.pop(key, None)
 
@@ -482,6 +512,18 @@ if search_clicked:
             st.error("Ошибка запроса к Scopus API.")
             st.code(str(exc))
             st.stop()
+    if records:
+        with st.spinner("Определяем области знаний по журналам Scopus..."):
+            try:
+                attach_subject_areas(
+                    records,
+                    api_key,
+                    st.session_state.setdefault("issn_subject_cache", {}),
+                )
+            except Exception:
+                for rec in records:
+                    rec.setdefault("subject_abbrevs", [])
+                    rec.setdefault("subject_areas", "Не указано")
 
     if not records:
         st.info("Статей по данному запросу не найдено.")
@@ -539,7 +581,18 @@ if "records" in st.session_state and st.session_state["records"]:
                 )
                 with st.spinner("Строим динамику за 5 лет..."):
                     try:
-                        st.session_state["dynamics_records"] = fetch_scopus_data(dyn_query, api_key, None)
+                        dyn_records = fetch_scopus_data(dyn_query, api_key, None)
+                        try:
+                            attach_subject_areas(
+                                dyn_records,
+                                api_key,
+                                st.session_state.setdefault("issn_subject_cache", {}),
+                            )
+                        except Exception:
+                            for rec in dyn_records:
+                                rec.setdefault("subject_abbrevs", [])
+                                rec.setdefault("subject_areas", "Не указано")
+                        st.session_state["dynamics_records"] = dyn_records
                         st.session_state["show_report"] = True
                         st.rerun()
                     except Exception as exc:
@@ -553,6 +606,7 @@ if "records" in st.session_state and st.session_state["records"]:
         if report_source:
             render_report_block(
                 build_report(report_source),
+                report_source,
                 author_mode=(st.session_state.get("search_mode") == "Поиск по автору"),
                 has_orcid=bool(st.session_state.get("author_orcid")),
             )

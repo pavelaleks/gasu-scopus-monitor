@@ -1,6 +1,6 @@
 import unittest
 
-from report import build_report, has_external_affiliation, report_chart_png, report_sentence, ru_publications
+from report import build_report, has_external_affiliation, report_area_png, report_chart_png, report_sentence, ru_publications
 
 
 class ReportTests(unittest.TestCase):
@@ -58,6 +58,11 @@ class ReportTests(unittest.TestCase):
         png = report_chart_png(build_report(records))
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertLess(len(png), 80_000)
+
+    def test_area_png_is_compact(self):
+        png = report_area_png([("Социальные науки", 12), ("Инженерия", 5), ("Не указано", 2)])
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertLess(len(png), 120_000)
 
 
 if __name__ == "__main__":

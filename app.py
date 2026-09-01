@@ -26,6 +26,7 @@ from gasu import (
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
+    parse_author_query,
     parse_author_retrieval,
     parse_author_search_profile,
     parse_authors,
@@ -83,7 +84,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.10.0"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -276,10 +277,34 @@ def period_filter_widgets() -> tuple[str, int | None, int | None]:
 
 def papers_mode_search_hint(mode: str, contest_year: int) -> str:
     if mode == MODE_RSF:
-        return f"Нажмите «РНФ {contest_year}, от 8 статей» или «от 5 статей»."
-    if mode == MODE_AUTHOR:
-        return "Нажмите «Найти публикации»."
-    return "Нажмите «Найти публикации» или «Статьи ГАГУ за текущий год»."
+        return "Нажмите «От 8 статей» или «От 5 статей»."
+    return "Нажмите «Найти публикации»."
+
+
+def render_how_we_count(mode: str, window) -> None:
+    with st.expander("Как считаем"):
+        if mode == MODE_UNIVERSITY:
+            st.markdown(
+                "В список входят записи, где Scopus показывает ГАГУ по названию или городу "
+                "(в том числе как одну из нескольких аффилиаций). "
+                "Соавторы учитываются, если они есть в ответе по статье. "
+                "Полный список работ человека — режим «Поиск по автору». "
+                "Потенциальные грантодержатели — режим «РНФ»."
+            )
+        elif mode == MODE_RSF:
+            st.markdown(
+                f"Конкурс {window.contest_year}: порог — все статьи Scopus автора с {window.from_label}, "
+                "не только с аффилиацией ГАГУ. В таблицу попадают люди, у которых в этом окне "
+                "есть хотя бы одна статья с ГАГУ. Штат и совместительство Scopus не показывает. "
+                "Это оценка для мониторинга, не экспертиза заявки. "
+                "«Всего Scopus» уточняется по Author ID, если его нет — по ORCID."
+            )
+        else:
+            st.markdown(
+                "Карточка сверху — показатели профиля Scopus за всю карьеру. "
+                "Таблица ниже — только работы за выбранный период. "
+                "Надёжнее ORCID или Scopus Author ID: фамилия может дать однофамильцев."
+            )
 
 
 @st.cache_data(ttl=60 * 60 * 24 * 30, show_spinner=False)
@@ -680,8 +705,8 @@ def records_to_dataframe(records: list[dict]) -> pd.DataFrame:
     for rec in records:
         rows.append(
             {
-                "Год": rec["year"],
                 "Авторы": format_authors_gost(rec["authors"]),
+                "Год": rec["year"],
                 "Название": rec["title"],
                 "Квартиль": format_quartile_cell(rec),
                 "Журнал": rec["journal"],
@@ -818,7 +843,6 @@ def render_report_block(
     author_last: str = "",
     show_top_authors: bool = True,
 ) -> None:
-    st.subheader("Динамика для отчёта")
     if author_mode and not precise_author:
         st.warning(
             "Профиль Scopus не сопоставился однозначно: показаны работы по фамилии. "
@@ -871,7 +895,6 @@ def render_report_block(
                 file_name="scopus_oblasti.png",
                 mime="image/png",
                 key="download_area_png",
-                use_container_width=True,
             )
         with dl_right:
             st.download_button(
@@ -880,7 +903,6 @@ def render_report_block(
                 file_name="scopus_kvartili.png",
                 mime="image/png",
                 key="download_quartile_png",
-                use_container_width=True,
             )
         st.caption(
             "Слева — основная область журнала в Scopus (одна статья — один сектор; "
@@ -967,16 +989,30 @@ if st.session_state.get("records_version") != APP_VERSION:
     ):
         st.session_state.pop(key, None)
 
-st.title("Мониторинг публикаций Scopus")
-
 api_key = load_api_key()
 on_cloud = running_on_streamlit_cloud()
+window = rsf_window()
+
+mode = st.radio(
+    "Режим",
+    [MODE_UNIVERSITY, MODE_RSF, MODE_AUTHOR],
+    horizontal=True,
+    key="ui_mode",
+    label_visibility="collapsed",
+)
+
+if mode == MODE_UNIVERSITY:
+    st.title("Статьи ГАГУ")
+elif mode == MODE_RSF:
+    st.title(f"РНФ {window.contest_year}")
+else:
+    st.title("Поиск автора")
+
 with st.sidebar:
-    st.header("Доступ")
     if st.button("Выйти"):
         logout(auth_cookies)
-    st.header("Scopus")
     if not api_key:
+        st.header("Scopus")
         if on_cloud:
             st.warning(
                 "Добавьте `SCOPUS_API_KEY` в Settings → Secrets приложения. "
@@ -993,27 +1029,17 @@ with st.sidebar:
                 else:
                     st.warning("Введите корректный ключ.")
     else:
-        st.success("API-ключ найден.")
-        st.caption("Ключ берётся из Secrets (Cloud) или из `.env` (локально). Пользователи его не вводят.")
-        built = lookup_built_on()
-        nxt = next_refresh_date()
-        max_year = load_meta().get("max_year")
-        st.caption(
-            f"Справочник квартилей SCImago обновлён {format_ru_date(built)}. "
-            f"Следующее автообновление: {format_ru_date(nxt)}."
-        )
-        if max_year:
-            st.caption(f"В файле рейтинги журналов по {max_year} год включительно.")
+        with st.expander("Справочники"):
+            built = lookup_built_on()
+            nxt = next_refresh_date()
+            max_year = load_meta().get("max_year")
+            st.caption(
+                f"Квартили SCImago обновлены {format_ru_date(built)}. "
+                f"Следующее обновление: {format_ru_date(nxt)}."
+            )
+            if max_year:
+                st.caption(f"Рейтинги журналов по {max_year} год.")
 
-mode = st.radio(
-    "Режим поиска",
-    [MODE_UNIVERSITY, MODE_RSF, MODE_AUTHOR],
-    horizontal=True,
-    key="ui_mode",
-)
-
-window = rsf_window()
-quick_check = False
 quick_rsf8 = False
 quick_rsf5 = False
 author_last = ""
@@ -1027,49 +1053,39 @@ search_clicked = False
 grant_min = None
 
 if mode == MODE_UNIVERSITY:
-    st.caption(
-        "Статьи, где ГАГУ указан хотя бы как одна из аффилиаций. "
-        "Соавторы считаются наравне с первым автором, если Scopus их вернул. "
-        "Полный список работ одного человека — режим «Поиск по автору». "
-        "Потенциальные грантодержатели — отдельный режим «РНФ»."
-    )
+    st.caption("Публикации вуза в Scopus за выбранный период.")
+    render_how_we_count(mode, window)
     time_filter, start_year, end_year = period_filter_widgets()
-    year_col, find_col, _ = st.columns([2, 2, 3])
-    with year_col:
-        quick_check = st.button("Статьи ГАГУ за текущий год", key="quick_year")
+    find_col, _ = st.columns([2, 5])
     with find_col:
-        search_clicked = st.button("Найти публикации", key="search_university")
-    if quick_check:
-        time_filter = "Текущий год"
-        search_clicked = True
+        search_clicked = st.button("Найти публикации", type="primary", key="search_university")
 elif mode == MODE_RSF:
     st.caption(
-        f"Ближайший конкурс РНФ — {window.contest_year} год. "
-        f"Порог считается по всем статьям Scopus автора с {window.from_label}, не только с аффилиацией ГАГУ. "
-        "В список попадают люди, у которых в этом окне есть хотя бы одна статья с ГАГУ. "
-        "Штат или совместительство Scopus не показывает. Это оценка для мониторинга, не экспертиза заявки."
+        f"Кто из авторов статей ГАГУ набирает порог Scopus с {window.from_label}."
     )
+    render_how_we_count(mode, window)
     eight_col, five_col, _ = st.columns([2, 2, 3])
     with eight_col:
-        quick_rsf8 = st.button(f"РНФ {window.contest_year}, от 8 статей", key="quick_rsf8")
+        quick_rsf8 = st.button("От 8 статей", key="quick_rsf8")
     with five_col:
-        quick_rsf5 = st.button(f"РНФ {window.contest_year}, от 5 статей", key="quick_rsf5")
+        quick_rsf5 = st.button("От 5 статей", key="quick_rsf5")
     if quick_rsf8 or quick_rsf5:
         time_filter = "РНФ"
         grant_min = 8 if quick_rsf8 else 5
         search_clicked = True
 else:
-    st.caption(
-        "Публикации одного человека. Сверху — карточка профиля Scopus "
-        "(ID, ORCID, цитирования, документы, h-индекс), ниже — работы за выбранный период. "
-        "РНФ здесь не строится. Надёжнее ORCID или Scopus Author ID; фамилия без них может дать однофамильцев."
-    )
-    author_last = st.text_input("Фамилия")
-    author_orcid = st.text_input("ORCID (если есть)")
-    author_scopus_id = st.text_input("Scopus Author ID (если есть)", placeholder="58102647800")
+    st.caption("Профиль Scopus и работы одного человека за период.")
+    render_how_we_count(mode, window)
+    who = st.text_input("Автор", placeholder="ORCID, Scopus Author ID или фамилия")
+    parsed_who = parse_author_query(who)
+    author_last = parsed_who["surname"]
+    author_orcid = parsed_who["orcid"]
+    author_scopus_id = parsed_who["authid"]
     only_gasu = st.checkbox("Только аффилиация ГАГУ", value=False)
     time_filter, start_year, end_year = period_filter_widgets()
-    search_clicked = st.button("Найти публикации", key="search_author")
+    find_col, _ = st.columns([2, 5])
+    with find_col:
+        search_clicked = st.button("Найти публикации", type="primary", key="search_author")
 
 date_filter = None
 if time_filter == "Текущий год":
@@ -1094,7 +1110,7 @@ if search_clicked:
         st.stop()
     author_id_digits = "".join(ch for ch in (author_scopus_id or "") if ch.isdigit())
     if mode == MODE_AUTHOR and not author_orcid and not author_last and not author_id_digits:
-        st.error("Для поиска по автору укажите фамилию, ORCID или Scopus Author ID.")
+        st.error("Укажите ORCID, Scopus Author ID или фамилию.")
         st.stop()
     if not grant_min:
         clear_grant_state()
@@ -1204,7 +1220,7 @@ if search_clicked:
     st.session_state["author_orcid"] = author_orcid
     st.session_state["only_gasu"] = only_gasu
     st.session_state["author_identity"] = identity
-    st.session_state["show_report"] = mode == MODE_AUTHOR
+    st.session_state.pop("show_report", None)
     st.session_state.pop("dynamics_records", None)
     if grant_min:
         st.session_state["grant_min"] = grant_min
@@ -1225,31 +1241,23 @@ if search_clicked:
     else:
         clear_grant_state()
 
-if "records" in st.session_state and st.session_state["records"]:
-    saved_mode = st.session_state.get("search_mode") or MODE_UNIVERSITY
-    if saved_mode != mode:
-        st.info(
-            "Сейчас выбран другой режим, чем в прошлой выдаче. "
-            + papers_mode_search_hint(mode, window.contest_year)
-        )
-        st.stop()
+saved_mode = st.session_state.get("search_mode") or MODE_UNIVERSITY
+has_records = bool(st.session_state.get("records"))
+if has_records and saved_mode != mode:
+    st.caption(
+        "В этом режиме пока нет выдачи. " + papers_mode_search_hint(mode, window.contest_year)
+    )
+elif has_records:
     records = st.session_state["records"]
-    active_date_filter = st.session_state.get("date_filter")
-    records_for_list = sort_records_for_bibliography(records, active_date_filter)
+    records_for_list = sort_records_for_bibliography(records, st.session_state.get("date_filter"))
     grant_min_saved = st.session_state.get("grant_min") if saved_mode == MODE_RSF else None
     grant_rows: list[dict] = list(st.session_state.get("grant_rows") or [])
+    profile = st.session_state.get("target_profile") or {}
+
     if grant_min_saved:
-        contest = st.session_state.get("grant_contest_year")
-        from_year = st.session_state.get("grant_from_year")
-        st.subheader("Потенциальные грантодержатели РНФ")
-        st.write(
-            f"Конкурс {contest}: порог — не менее {grant_min_saved} публикаций Scopus "
-            f"с января {from_year}, с любой аффилиацией."
-        )
-        g1, g2, g3 = st.columns(3)
-        g1.metric("Могут подавать сейчас", len(grant_rows))
+        g1, g2 = st.columns(2)
+        g1.metric("Могут подавать", len(grant_rows))
         g2.metric("Статей ГАГУ в окне", len(records))
-        g3.metric("Порог", f"{grant_min_saved} Scopus")
         if grant_rows:
             st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
         else:
@@ -1257,35 +1265,22 @@ if "records" in st.session_state and st.session_state["records"]:
         failed = int(st.session_state.get("grant_failed") or 0)
         with_id = int(st.session_state.get("grant_with_id") or 0)
         people = int(st.session_state.get("grant_people") or 0)
-        named = int(st.session_state.get("grant_named") or 0)
-        counted = with_id
-        if people and counted == 0:
-            st.warning(
-                "Профили Scopus не сопоставились (Author Search не вернул однозначный Author ID). "
-                "Порог посчитан по тем же статьям ГАГУ, что в списке ниже."
+        if people and with_id == 0:
+            st.caption("Профили Scopus не сопоставились однозначно: порог посчитан по статьям ГАГУ ниже.")
+        elif people:
+            st.caption(
+                f"Author ID есть у {with_id} из {people} авторов."
+                + (f" Ошибки запроса: {failed}." if failed else "")
             )
-        st.caption(
-            "Счёт РНФ — по тем же статьям, что список литературы ниже. "
-            "Профиль автора (Author ID, ORCID, h-индекс, документы, цитирования) берётся из Author Search / Author Retrieval, "
-            "как на странице автора в Scopus. Если API не отдаёт поле — ячейка пустая. "
-            "«Всего Scopus» в окне РНФ уточняется по Author ID, если его нет — по ORCID. "
-            "Это оценка для мониторинга, не экспертиза заявки."
-            + (
-                f" Author ID есть у {counted} из {people} авторов."
-                if people
-                else ""
-            )
-            + (f" Ошибки запроса: {failed}." if failed else "")
-        )
 
-    profile = st.session_state.get("target_profile") or {}
-    if saved_mode == MODE_AUTHOR and (profile.get("authid") or profile.get("orcid") or profile.get("h_index") is not None):
+    if saved_mode == MODE_AUTHOR and (
+        profile.get("authid") or profile.get("orcid") or profile.get("h_index") is not None
+    ):
         render_scopus_profile_card(
             profile,
             fallback_name=st.session_state.get("author_last") or "",
         )
 
-    st.subheader("Результаты")
     slice_report = build_report(records)
     kpi1, kpi2, kpi3 = st.columns(3)
     kpi1.metric("Публикаций в срезе", slice_report.total)
@@ -1293,106 +1288,24 @@ if "records" in st.session_state and st.session_state["records"]:
     kpi3.metric("Журналов и изданий", slice_report.unique_journals)
     if saved_mode == MODE_AUTHOR:
         st.caption(
-            "Список — работы выбранного автора за указанный период. "
-            + (
-                "Показаны только записи с аффилиацией ГАГУ."
-                if st.session_state.get("only_gasu")
-                else "Фильтр «только ГАГУ» выключен: аффилиация не ограничивается университетом."
-            )
+            "Таблица — работы за выбранный период"
+            + (" с аффилиацией ГАГУ." if st.session_state.get("only_gasu") else ".")
         )
     elif saved_mode == MODE_RSF:
+        st.caption("Таблица — статьи ГАГУ в окне конкурса. Порог выше считает все Scopus-работы автора.")
+    truncated = truncated_author_paper_count(records)
+    if truncated and saved_mode in {MODE_UNIVERSITY, MODE_RSF}:
         st.caption(
-            "Ниже — статьи с аффилиацией ГАГУ в окне конкурса. "
-            "Таблица грантодержателей выше считает все Scopus-работы автора за то же окно, не только эти строки."
+            f"У {truncated} из {len(records)} статей Scopus отдал только одного автора."
         )
-        truncated = truncated_author_paper_count(records)
-        if truncated:
-            st.warning(
-                f"У {truncated} из {len(records)} статей Scopus отдал только одного автора "
-                "(обычно первого). Соавторы могут не попасть в таблицу РНФ. "
-                "Полный список человека — режим «Поиск по автору»."
-            )
-    else:
-        st.caption(
-            "В список входят только записи, где в ответе Scopus видно ГАГУ по названию или городу "
-            "(в том числе как одна из нескольких аффилиаций)."
-        )
-        truncated = truncated_author_paper_count(records)
-        if truncated:
-            st.warning(
-                f"У {truncated} из {len(records)} статей Scopus отдал только одного автора "
-                "(обычно первого). Соавторы не попадут в список литературы "
-                "и в «наиболее активные авторы». Полный список человека — «Поиск по автору»."
-            )
-
-    active_filter = st.session_state.get("date_filter") or {}
-    filter_span = 1
-    if active_filter.get("year_start") and active_filter.get("year_end"):
-        filter_span = int(active_filter["year_end"]) - int(active_filter["year_start"]) + 1
-    can_chart_from_slice = slice_report.distinct_years >= 2 or filter_span >= 2
-
-    if not st.session_state.get("show_report"):
-        if can_chart_from_slice:
-            if st.button("Показать динамику для отчёта"):
-                st.session_state["show_report"] = True
-                st.rerun()
-        elif st.button("Динамика за 5 лет"):
-            if not api_key:
-                st.error("Нужен API-ключ Scopus.")
-            else:
-                last5 = make_date_filter("last5", None, None)
-                dyn_query = build_query(
-                    st.session_state.get("search_mode") or "Мониторинг ГАГУ",
-                    st.session_state.get("author_last") or "",
-                    st.session_state.get("author_orcid") or "",
-                    last5,
-                    bool(st.session_state.get("only_gasu")),
-                )
-                with st.spinner("Строим динамику за 5 лет..."):
-                    try:
-                        dyn_records = fetch_scopus_data(dyn_query, api_key, None)
-                        try:
-                            fill_subject_areas(dyn_records, api_key)
-                        except Exception:
-                            for rec in dyn_records:
-                                rec.setdefault("subject_abbrevs", [])
-                                rec.setdefault("subject_areas", "Не указано")
-                        try:
-                            attach_scimago(dyn_records)
-                        except Exception:
-                            for rec in dyn_records:
-                                rec.setdefault("scimago_quartile", "Нет")
-                        st.session_state["dynamics_records"] = dyn_records
-                        st.session_state["show_report"] = True
-                        st.rerun()
-                    except Exception as exc:
-                        st.error("Не удалось получить данные за 5 лет.")
-                        st.code(str(exc))
-
-    if st.session_state.get("show_report"):
-        report_source = st.session_state.get("dynamics_records")
-        if report_source is None:
-            report_source = records
-        if report_source:
-            render_report_block(
-                build_report(report_source),
-                report_source,
-                author_mode=(st.session_state.get("search_mode") == MODE_AUTHOR),
-                precise_author=st.session_state.get("author_identity") in {"orcid", "au-id"},
-                university=(st.session_state.get("search_mode") == MODE_UNIVERSITY),
-                author_last=st.session_state.get("author_last") or "",
-                show_top_authors=(st.session_state.get("search_mode") == MODE_UNIVERSITY),
-            )
-        else:
-            st.info("За этот период публикаций не найдено.")
 
     df = records_to_dataframe(records_for_list)
     st.dataframe(
         df,
         use_container_width=True,
         column_config={
-            "Год": st.column_config.TextColumn("Год", width="small"),
             "Авторы": st.column_config.TextColumn("Авторы", width="medium"),
+            "Год": st.column_config.TextColumn("Год", width="small"),
             "Название": st.column_config.TextColumn("Название", width="large"),
             "Квартиль": st.column_config.TextColumn("Квартиль", width="small"),
         },
@@ -1400,32 +1313,18 @@ if "records" in st.session_state and st.session_state["records"]:
     st.caption(
         "Строки — по фамилии первого автора, у одного автора новые годы сверху. "
         "Квартиль — лучший квартиль журнала в SCImago. "
-        f"Если года статьи ещё нет в рейтинге, в скобках указан год SJR (сейчас до {load_meta().get('max_year') or '—'}). "
-        "Это не оценка текста статьи."
+        f"Если года статьи ещё нет в рейтинге, в скобках указан год SJR (сейчас до {load_meta().get('max_year') or '—'})."
     )
 
-    st.subheader("Готовый список литературы")
-    format_choice = st.selectbox("Формат", ["ГОСТ 7.0.5", "APA 7th Edition"])
-    formatted_list = [
-        format_gost(rec) if format_choice == "ГОСТ 7.0.5" else format_apa(rec)
-        for rec in records_for_list
-    ]
-    st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
-    if saved_mode in {MODE_UNIVERSITY, MODE_RSF} and truncated_author_paper_count(records_for_list):
-        st.caption(
-            "В ГОСТ/APA выводятся те авторы, которых Scopus вернул по статье. "
-            "Если в записи один человек — соавторы в этой строке не скрыты форматом, их нет в ответе API."
-        )
-
+    format_choice = "ГОСТ 7.0.5"
     docx_buffer = build_docx(records_for_list, format_choice)
     xlsx_buffer = build_xlsx(
         records_for_list,
-        st.session_state.get("dynamics_records") or records,
+        records,
         university=(saved_mode == MODE_UNIVERSITY),
         grant_rows=grant_rows if grant_min_saved else None,
         profile=profile if saved_mode == MODE_AUTHOR else None,
     )
-
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -1442,10 +1341,29 @@ if "records" in st.session_state and st.session_state["records"]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    with st.expander("Динамика и состав"):
+        render_report_block(
+            build_report(records),
+            records,
+            author_mode=(saved_mode == MODE_AUTHOR),
+            precise_author=st.session_state.get("author_identity") in {"orcid", "au-id"},
+            university=(saved_mode == MODE_UNIVERSITY),
+            author_last=st.session_state.get("author_last") or "",
+            show_top_authors=(saved_mode == MODE_UNIVERSITY),
+        )
+
+    with st.expander("Список литературы"):
+        format_choice = st.selectbox("Формат", ["ГОСТ 7.0.5", "APA 7th Edition"])
+        formatted_list = [
+            format_gost(rec) if format_choice == "ГОСТ 7.0.5" else format_apa(rec)
+            for rec in records_for_list
+        ]
+        st.markdown("\n".join([f"{i}. {text}" for i, text in enumerate(formatted_list, start=1)]))
+
 st.markdown("---")
 st.caption("© Алексеев П.В., pavel.alekseev.gasu@gmail.com, Горно-Алтайский государственный университет")
 st.caption(f"Версия {APP_VERSION} · последнее обновление {last_updated_label()}")
-if st.session_state.get("query"):
+if has_records and saved_mode == mode and st.session_state.get("query"):
     with st.sidebar:
         with st.expander("Запрос Scopus"):
             st.code(st.session_state["query"])

@@ -71,6 +71,26 @@ def normalize_orcid(value: str) -> str:
     return text.strip().replace(" ", "")
 
 
+_ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$", re.IGNORECASE)
+
+
+def parse_author_query(value: str) -> dict:
+    """Одно поле: ORCID, Scopus Author ID или фамилия."""
+    text = (value or "").strip()
+    empty = {"kind": "", "orcid": "", "authid": "", "surname": ""}
+    if not text:
+        return empty
+    orcid = normalize_orcid(text)
+    if _ORCID_RE.match(orcid):
+        return {"kind": "orcid", "orcid": orcid, "authid": "", "surname": ""}
+    compact = text.replace(" ", "")
+    digits = "".join(ch for ch in compact if ch.isdigit())
+    if compact.isdigit() and len(digits) >= 6:
+        return {"kind": "au-id", "orcid": "", "authid": digits, "surname": ""}
+    surname = text.replace(",", " ").split()[0]
+    return {"kind": "surname", "orcid": "", "authid": "", "surname": surname}
+
+
 def gasu_affiliation_clause() -> str:
     """Только узнаваемые имена вуза, без акронима GASU и без AF-ID."""
     names = " OR ".join(f"AFFILORG({quoted(name)})" for name in AFFILIATION_NAMES)

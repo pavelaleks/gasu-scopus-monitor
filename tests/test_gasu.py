@@ -18,6 +18,7 @@ from gasu import (
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
+    parse_author_query,
     parse_author_retrieval,
     parse_author_search_profile,
     parse_author_text,
@@ -71,6 +72,24 @@ class GasuQueryTests(unittest.TestCase):
     def test_author_search_without_gasu_filter_does_not_restrict_affiliation(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, False)
         self.assertNotIn("AFFILORG(", query)
+
+    def test_parse_author_query_accepts_orcid_url_authid_or_surname(self):
+        orcid = parse_author_query("https://orcid.org/0000-0002-8043-4014")
+        self.assertEqual(orcid["kind"], "orcid")
+        self.assertEqual(orcid["orcid"], "0000-0002-8043-4014")
+        self.assertEqual(orcid["authid"], "")
+        self.assertEqual(orcid["surname"], "")
+
+        authid = parse_author_query("57222578674")
+        self.assertEqual(authid["kind"], "au-id")
+        self.assertEqual(authid["authid"], "57222578674")
+        self.assertEqual(authid["orcid"], "")
+
+        surname = parse_author_query("Сафонова П.В.")
+        self.assertEqual(surname["kind"], "surname")
+        self.assertEqual(surname["surname"], "Сафонова")
+        self.assertEqual(surname["orcid"], "")
+        self.assertEqual(parse_author_query(""), {"kind": "", "orcid": "", "authid": "", "surname": ""})
 
     def test_author_search_with_orcid_is_person_query(self):
         query = build_query(

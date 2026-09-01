@@ -31,16 +31,17 @@ class AppModeTests(unittest.TestCase):
         self.assertEqual(options, ["Мониторинг ГАГУ", "РНФ", "Поиск по автору"])
 
         labels = _labels(at)
-        self.assertIn("Статьи ГАГУ за текущий год", labels)
         self.assertIn("Найти публикации", labels)
-        self.assertFalse(any("от 8 статей" in item or "от 5 статей" in item for item in labels))
+        self.assertNotIn("Статьи ГАГУ за текущий год", labels)
+        self.assertFalse(any("От 8 статей" in item or "От 5 статей" in item for item in labels))
         self.assertFalse(any("Авторы ГАГУ" in item for item in labels))
+        self.assertIn("Как считаем", {item.label for item in at.expander})
 
         at.radio[0].set_value("РНФ").run()
         self.assertFalse(at.exception)
         labels = _labels(at)
-        self.assertTrue(any("от 8 статей" in item for item in labels))
-        self.assertTrue(any("от 5 статей" in item for item in labels))
+        self.assertIn("От 8 статей", labels)
+        self.assertIn("От 5 статей", labels)
         self.assertNotIn("Статьи ГАГУ за текущий год", labels)
         self.assertNotIn("Найти публикации", labels)
         self.assertFalse(any("Авторы ГАГУ" in item for item in labels))
@@ -49,8 +50,9 @@ class AppModeTests(unittest.TestCase):
         self.assertFalse(at.exception)
         labels = _labels(at)
         self.assertIn("Найти публикации", labels)
-        self.assertFalse(any("от 8 статей" in item or "от 5 статей" in item for item in labels))
-        self.assertIn("Фамилия", {item.label for item in at.text_input})
+        self.assertFalse(any("От 8 статей" in item or "От 5 статей" in item for item in labels))
+        self.assertIn("Автор", {item.label for item in at.text_input})
+        self.assertNotIn("Фамилия", {item.label for item in at.text_input})
 
 
 if __name__ == "__main__":

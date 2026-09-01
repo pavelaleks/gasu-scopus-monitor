@@ -25,6 +25,7 @@ from gasu import (
     first_initial,
     format_affiliations,
     _field_int,
+    authors_look_truncated,
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
@@ -38,6 +39,9 @@ from gasu import (
     paper_abstract_urls,
     paper_authors_matching,
     parse_author_count,
+    parse_crossref_authors,
+    merge_author_lists,
+    crossref_work_url,
     profile_metrics_from_papers,
     authid_on_every_paper,
     seed_profile_from_authors,
@@ -91,7 +95,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.6"
+APP_VERSION = "1.10.7"
 APP_UPDATED_FALLBACK = "01.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -326,8 +330,9 @@ def render_how_we_count(mode: str, window) -> None:
         elif mode == MODE_RSF:
             st.markdown(
                 f"Конкурс {window.contest_year}: порог — все статьи Scopus автора с {window.from_label}, "
-                "не только с аффилиацией ГАГУ. В таблицу попадают люди, у которых в этом окне "
-                "есть хотя бы одна статья с ГАГУ. Штат и совместительство Scopus не показывает. "
+                "не только с аффилиацией ГАГУ. В таблицу попадают **все авторы** статей ГАГУ в окне, "
+                "не только первые: иначе молодые исследователи в коллективных работах не видны. "
+                "Штат и совместительство Scopus не показывает. "
                 "Это оценка для мониторинга, не экспертиза заявки. "
                 "«Всего Scopus» уточняется по Author ID, если его нет — по ORCID."
             )
@@ -495,31 +500,75 @@ def fetch_paper_authors(record: dict, api_key: str) -> tuple[list[dict], int]:
     return [], last_status
 
 
+def fetch_crossref_authors(doi: str) -> list[dict]:
+    """Crossref по DOI: полный список авторов без ключа Elsevier."""
+    url = crossref_work_url(doi)
+    if not url:
+        return []
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            f"gasu-scopus-monitor/{APP_VERSION} "
+            "(https://github.com/pavelaleks/gasu-scopus-monitor; "
+            "mailto:pavelaleks@users.noreply.github.com)"
+        ),
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+    except requests.RequestException:
+        return []
+    if response.status_code != 200:
+        return []
+    try:
+        return parse_crossref_authors(response.json())
+    except Exception:
+        return []
+
+
 def enrich_record_authors(records: list[dict], api_key: str) -> int:
-    """По Scopus ID статьи добираем полный список авторов и их Author ID, если API открыт."""
+    """Полный список авторов: Abstract Retrieval, иначе Crossref по DOI."""
+    updated = 0
     todo = [rec for rec in records if needs_author_enrichment(rec)]
-    if not todo:
-        return 0
-    sample, status = fetch_paper_authors(todo[0], api_key)
-    if status in {401, 403} and not sample:
-        return 0
-    if sample:
-        todo[0]["authors"] = sample
-        todo = todo[1:]
-    if not todo:
-        return 1 if sample else 0
-    updated = 1 if sample else 0
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(fetch_paper_authors, rec, api_key): rec for rec in todo}
-        for fut in as_completed(futures):
-            rec = futures[fut]
-            try:
-                authors, _status = fut.result()
-            except Exception:
-                continue
-            if authors:
-                rec["authors"] = authors
-                updated += 1
+    abstract_ok = bool(api_key) and bool(todo)
+    if abstract_ok:
+        sample, status = fetch_paper_authors(todo[0], api_key)
+        if status in {401, 403} and not sample:
+            abstract_ok = False
+        elif sample:
+            todo[0]["authors"] = sample
+            updated += 1
+            todo = todo[1:]
+        if abstract_ok and todo:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {pool.submit(fetch_paper_authors, rec, api_key): rec for rec in todo}
+                for fut in as_completed(futures):
+                    rec = futures[fut]
+                    try:
+                        authors, _status = fut.result()
+                    except Exception:
+                        continue
+                    if authors:
+                        rec["authors"] = authors
+                        updated += 1
+    leftover = [
+        rec
+        for rec in records
+        if authors_look_truncated(rec) and (rec.get("doi") or "").strip()
+    ]
+    if leftover:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(fetch_crossref_authors, rec.get("doi") or ""): rec for rec in leftover
+            }
+            for fut in as_completed(futures):
+                rec = futures[fut]
+                try:
+                    extra = fut.result() or []
+                except Exception:
+                    extra = []
+                if extra:
+                    rec["authors"] = merge_author_lists(rec.get("authors") or [], extra)
+                    updated += 1
     return updated
 
 
@@ -1311,7 +1360,7 @@ if search_clicked:
         st.info("Статей по данному запросу не найдено.")
         st.stop()
 
-    with st.spinner("Дополняем соавторов по карточкам статей, если API это позволяет..."):
+    with st.spinner("Дополняем соавторов по карточкам статей и DOI, если Search отдал только первого..."):
         try:
             enrich_record_authors(records, api_key)
         except Exception:
@@ -1427,8 +1476,9 @@ elif has_records:
     if truncated:
         st.caption(
             f"У {truncated} из {len(records)} статей Scopus Search отдал неполный список авторов "
-            "(часто только первого). Соавторов добираем через Abstract Retrieval — "
-            "отдельный запрос на статью. Если ключ этот API не открывает, в таблице останется первый автор."
+            "(часто только первого). Соавторов добираем через Abstract Retrieval и, если ключ "
+            "его не открывает, по DOI из Crossref. Если и там пусто, в таблице и в списке РНФ "
+            "останется только первый автор — молодые исследователи в коллективных работах пропадут."
         )
 
     df = records_to_dataframe(records_for_list)

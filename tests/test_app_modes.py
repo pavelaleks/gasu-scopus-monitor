@@ -63,8 +63,9 @@ class AppModeTests(unittest.TestCase):
 
     def test_all_modes_try_abstract_retrieval_for_coauthors(self):
         text = APP_PATH.read_text(encoding="utf-8")
-        self.assertIn("Дополняем соавторов по карточкам статей, если API это позволяет...", text)
+        self.assertIn("Дополняем соавторов по карточкам статей и DOI, если Search отдал только первого...", text)
         self.assertIn('{"view": "FULL"}', text)
+        self.assertIn("fetch_crossref_authors", text)
         self.assertNotIn("if truncated and saved_mode in {MODE_UNIVERSITY, MODE_RSF}:", text)
         enrich_idx = text.index("enrich_record_authors(records, api_key)")
         authid_guard = text.find("if not authid_ready:", 0, enrich_idx)

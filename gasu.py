@@ -956,6 +956,119 @@ def truncated_author_paper_count(records: list[dict]) -> int:
     return sum(1 for rec in records or [] if authors_look_truncated(rec))
 
 
+def crossref_work_url(doi: str) -> str:
+    ident = (doi or "").strip()
+    lower = ident.lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/"):
+        if lower.startswith(prefix):
+            ident = ident[len(prefix) :]
+            break
+    ident = ident.strip()
+    if not ident:
+        return ""
+    return f"https://api.crossref.org/works/{quote(ident, safe='')}"
+
+
+def _initials_from_given(given: str) -> str:
+    text = (given or "").strip()
+    if not text:
+        return ""
+    compact = text.replace(" ", "").replace("-", "")
+    if re.fullmatch(r"(?:[A-Za-zА-ЯЁ][a-zа-яё]?\.)+", compact):
+        return compact if compact.endswith(".") else f"{compact}."
+    return "".join(f"{part[0].upper()}." for part in re.split(r"[\s\-]+", text) if part[:1].isalpha())
+
+
+def parse_crossref_authors(payload: dict) -> list[dict]:
+    """Авторы из Crossref /works — запасной список, когда Scopus отдал только первого."""
+    if not isinstance(payload, dict):
+        return []
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        message = payload
+    raw = message.get("author") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    authors: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        surname = (item.get("family") or "").strip()
+        given = (item.get("given") or "").strip()
+        if not surname:
+            continue
+        key = surname.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        authors.append(
+            {
+                "surname": surname,
+                "given": given,
+                "initials": _initials_from_given(given),
+                "from_gasu": None,
+                "authid": "",
+                "orcid": normalize_orcid(item.get("ORCID") or item.get("orcid") or ""),
+            }
+        )
+    return authors
+
+
+def merge_author_lists(primary: list[dict], extra: list[dict]) -> list[dict]:
+    """Полный список (Crossref) + Author ID/ORCID, которые уже были у Scopus."""
+    if not extra:
+        return [dict(item) for item in primary or []]
+    if not primary:
+        return [dict(item) for item in extra]
+    by_surname: dict[str, dict] = {}
+    for item in primary:
+        key = (item.get("surname") or "").strip().lower()
+        if key and key not in by_surname:
+            by_surname[key] = item
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for item in extra:
+        row = dict(item)
+        key = (row.get("surname") or "").strip().lower()
+        prior = by_surname.get(key) if key else None
+        if prior:
+            for field in ("authid", "orcid", "given", "initials"):
+                if prior.get(field) and not row.get(field):
+                    row[field] = prior[field]
+            if row.get("from_gasu") is None:
+                row["from_gasu"] = prior.get("from_gasu")
+        merged.append(row)
+        if key:
+            seen.add(key)
+    for item in primary:
+        key = (item.get("surname") or "").strip().lower()
+        if key and key not in seen:
+            merged.append(dict(item))
+            seen.add(key)
+    return merged
+
+
+def fill_truncated_authors_from_crossref(records: list[dict], fetch) -> int:
+    """fetch(doi) → список авторов. Нужен, чтобы в РНФ попадали не только первые авторы."""
+    updated = 0
+    for rec in records or []:
+        if not authors_look_truncated(rec):
+            continue
+        doi = (rec.get("doi") or "").strip()
+        if not doi:
+            continue
+        try:
+            extra = fetch(doi) or []
+        except Exception:
+            continue
+        if not extra:
+            continue
+        rec["authors"] = merge_author_lists(rec.get("authors") or [], extra)
+        updated += 1
+    return updated
+
+
 def record_sort_key(record: dict) -> tuple[str, int, str]:
     """Фамилия первого автора, затем год по убыванию, затем название."""
     authors = record.get("authors") or []

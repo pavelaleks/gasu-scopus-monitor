@@ -12,6 +12,7 @@ import streamlit as st
 from docx import Document
 
 from auth import cookie_manager, logout, require_login
+import gasu as _gasu
 from gasu import (
     GASU_FOUNDED_YEAR,
     apply_author_profile,
@@ -27,7 +28,6 @@ from gasu import (
     gasu_affiliation_clause,
     gasu_author_affil_clause,
     _field_int,
-    authors_look_truncated,
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
@@ -38,12 +38,7 @@ from gasu import (
     pick_scopus_authid,
     profile_display_name,
     more_scopus_pages,
-    paper_abstract_urls,
     paper_authors_matching,
-    parse_author_count,
-    parse_crossref_authors,
-    merge_author_lists,
-    crossref_work_url,
     profile_metrics_from_papers,
     authid_on_every_paper,
     seed_profile_from_authors,
@@ -52,6 +47,21 @@ from gasu import (
     record_sort_key,
     truncated_author_paper_count,
 )
+
+authors_look_truncated = getattr(
+    _gasu,
+    "authors_look_truncated",
+    lambda rec: len((rec or {}).get("authors") or []) < 2,
+)
+paper_abstract_urls = getattr(_gasu, "paper_abstract_urls", lambda rec: [])
+parse_author_count = getattr(_gasu, "parse_author_count", lambda _entry: None)
+parse_crossref_authors = getattr(_gasu, "parse_crossref_authors", lambda _payload: [])
+merge_author_lists = getattr(
+    _gasu,
+    "merge_author_lists",
+    lambda primary, extra: list(extra or primary or []),
+)
+crossref_work_url = getattr(_gasu, "crossref_work_url", lambda doi: "")
 from report import (
     ReportData,
     build_report,
@@ -62,11 +72,16 @@ from report import (
     report_sentence,
     rsf_candidates,
     rsf_eligibility_rows,
-    supplement_rsf_with_profiles,
     ru_publications,
     top_authors,
     apply_author_total,
 )
+
+try:
+    from report import supplement_rsf_with_profiles
+except ImportError:
+    def supplement_rsf_with_profiles(candidates, profiles, counts):
+        return list(candidates or []), 0
 from rsf import record_in_rsf_window, rsf_window
 from scimago import (
     attach_scimago,
@@ -98,7 +113,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.8"
+APP_VERSION = "1.10.9"
 APP_UPDATED_FALLBACK = "01.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"

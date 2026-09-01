@@ -24,6 +24,8 @@ from gasu import (
     entry_belongs_to_gasu,
     first_initial,
     format_affiliations,
+    gasu_affiliation_clause,
+    gasu_author_affil_clause,
     _field_int,
     authors_look_truncated,
     needs_author_enrichment,
@@ -60,6 +62,7 @@ from report import (
     report_sentence,
     rsf_candidates,
     rsf_eligibility_rows,
+    supplement_rsf_with_profiles,
     ru_publications,
     top_authors,
     apply_author_total,
@@ -95,7 +98,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.7"
+APP_VERSION = "1.10.8"
 APP_UPDATED_FALLBACK = "01.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -109,6 +112,7 @@ GRANT_STATE_KEYS = (
     "grant_with_id",
     "grant_people",
     "grant_named",
+    "grant_staff_added",
 )
 
 
@@ -330,8 +334,9 @@ def render_how_we_count(mode: str, window) -> None:
         elif mode == MODE_RSF:
             st.markdown(
                 f"Конкурс {window.contest_year}: порог — все статьи Scopus автора с {window.from_label}, "
-                "не только с аффилиацией ГАГУ. В таблицу попадают **все авторы** статей ГАГУ в окне, "
-                "не только первые: иначе молодые исследователи в коллективных работах не видны. "
+                "не только с аффилиацией ГАГУ. В таблицу попадают **все авторы** статей ГАГУ и "
+                "сотрудники с профилем ГАГУ в Scopus — не только первые авторы. "
+                "Иначе молодые исследователи в коллективных работах не видны. "
                 "Штат и совместительство Scopus не показывает. "
                 "Это оценка для мониторинга, не экспертиза заявки. "
                 "«Всего Scopus» уточняется по Author ID, если его нет — по ORCID."
@@ -394,27 +399,121 @@ def fetch_scopus_total(query: str, api_key: str) -> int:
     return int((payload.get("search-results") or {}).get("opensearch:totalResults") or 0)
 
 
-def _author_search_entries(query: str, api_key: str) -> list[dict]:
+def _author_search_page(query: str, api_key: str, *, start: int = 0, count: int = 15) -> tuple[list[dict], dict]:
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     try:
         response = requests.get(
             AUTHOR_URL,
             headers=headers,
-            params={"query": query, "count": 15, "start": 0},
+            params={"query": query, "count": count, "start": start},
             timeout=45,
         )
     except requests.RequestException:
-        return []
+        return [], {}
     if response.status_code != 200:
-        return []
+        return [], {}
     try:
         payload = response.json()
     except Exception:
-        return []
-    entries = (payload.get("search-results") or {}).get("entry") or []
+        return [], {}
+    search = payload.get("search-results") or {}
+    entries = search.get("entry") or []
     if isinstance(entries, dict):
         entries = [entries]
-    return [entry for entry in entries if isinstance(entry, dict)]
+    return [entry for entry in entries if isinstance(entry, dict)], search
+
+
+def _author_search_entries(query: str, api_key: str) -> list[dict]:
+    entries, _search = _author_search_page(query, api_key, start=0, count=15)
+    return entries
+
+
+def _author_search_all_entries(query: str, api_key: str, max_entries: int = 250) -> list[dict]:
+    found: list[dict] = []
+    start = 0
+    page_size = 25
+    total = None
+    while len(found) < max_entries:
+        entries, search = _author_search_page(query, api_key, start=start, count=page_size)
+        if total is None:
+            try:
+                total = int(search.get("opensearch:totalResults") or 0)
+            except (TypeError, ValueError):
+                total = 0
+        found.extend(entries)
+        start += page_size
+        if not more_scopus_pages(
+            page_len=len(entries),
+            page_size=page_size,
+            next_start=start,
+            reported_total=total,
+        ):
+            break
+    return found[:max_entries]
+
+
+def fetch_gasu_staff_profiles(api_key: str) -> list[dict]:
+    """Author Search по аффилиации ГАГУ — не AF-ID. Дальше каждый проверяется статьёй вуза."""
+    profiles: list[dict] = []
+    seen: set[str] = set()
+    for entry in _author_search_all_entries(gasu_author_affil_clause(), api_key):
+        profile = parse_author_search_profile(entry)
+        authid = (profile.get("authid") or "").strip()
+        if not authid.isdigit() or authid in seen:
+            continue
+        seen.add(authid)
+        profiles.append(profile)
+    return profiles
+
+
+def rsf_profile_paper_counts(authid: str, window, api_key: str) -> tuple[int, int]:
+    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    if not ident:
+        return 0, 0
+    years = author_id_query(ident, window.from_year, window.to_year)
+    try:
+        gasu_n = fetch_scopus_total(f"{years} AND {gasu_affiliation_clause()}", api_key)
+    except Exception:
+        return 0, 0
+    if gasu_n < 1:
+        return 0, 0
+    try:
+        total = fetch_scopus_total(years, api_key)
+    except Exception:
+        total = gasu_n
+    return gasu_n, total
+
+
+def add_gasu_staff_to_rsf(candidates: list[dict], window, api_key: str, min_papers: int) -> tuple[list[dict], int]:
+    profiles = fetch_gasu_staff_profiles(api_key)
+    if not profiles:
+        return candidates, 0
+    cache: dict[str, tuple[int, int]] = {}
+    need: list[str] = []
+    known_ids = {(row.get("authid") or "").strip() for row in candidates if (row.get("authid") or "").strip()}
+    for profile in profiles:
+        authid = (profile.get("authid") or "").strip()
+        if not authid.isdigit() or authid in known_ids:
+            continue
+        docs = profile.get("documents")
+        if isinstance(docs, int) and docs < min_papers:
+            continue
+        need.append(authid)
+    if need:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {
+                pool.submit(rsf_profile_paper_counts, authid, window, api_key): authid for authid in need
+            }
+            for fut in as_completed(futures):
+                try:
+                    cache[futures[fut]] = fut.result()
+                except Exception:
+                    cache[futures[fut]] = (0, 0)
+    return supplement_rsf_with_profiles(
+        candidates,
+        profiles,
+        lambda authid: cache.get(authid, (0, 0)),
+    )
 
 
 def resolve_author_profile(
@@ -1136,6 +1235,7 @@ if st.session_state.get("records_version") != APP_VERSION:
         "grant_with_id",
         "grant_people",
         "grant_named",
+        "grant_staff_added",
         "target_profile",
         "author_identity",
     ):
@@ -1404,6 +1504,14 @@ if search_clicked:
         st.session_state["grant_contest_year"] = window.contest_year
         st.session_state["grant_from_year"] = window.from_year
         candidates = rsf_candidates(records)
+        with st.spinner("Ищем сотрудников ГАГУ в Scopus — не только первых авторов статей..."):
+            try:
+                candidates, added_staff = add_gasu_staff_to_rsf(
+                    candidates, window, api_key, grant_min
+                )
+            except Exception:
+                added_staff = 0
+        st.session_state["grant_staff_added"] = added_staff
         st.session_state["grant_rows"] = rsf_eligibility_rows(candidates, grant_min)
         st.session_state["grant_people"] = len(candidates)
         st.session_state["grant_with_id"] = sum(1 for cand in candidates if cand.get("authid"))
@@ -1448,6 +1556,16 @@ elif has_records:
             st.caption(
                 f"Author ID есть у {with_id} из {people} авторов."
                 + (f" Ошибки запроса: {failed}." if failed else "")
+            )
+        staff_added = int(st.session_state.get("grant_staff_added") or 0)
+        if staff_added:
+            st.caption(
+                f"Дополнительно из профилей ГАГУ в Scopus (не первые авторы статей): {staff_added}."
+            )
+        else:
+            st.caption(
+                "Список включает авторов статей ГАГУ и сотрудников с профилем ГАГУ в Scopus, "
+                "не только первых авторов."
             )
 
     if saved_mode == MODE_AUTHOR:

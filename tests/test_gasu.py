@@ -14,6 +14,7 @@ from gasu import (
     entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
+    gasu_author_affil_clause,
     h_index_from_citation_counts,
     has_gasu_affiliation,
     match_authid_on_paper,
@@ -173,6 +174,11 @@ class GasuQueryTests(unittest.TestCase):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)
         self.assertIn("AFFILORG(", query)
         self.assertIn("Alekseev", query)
+        staff = gasu_author_affil_clause()
+        self.assertIn("AFFIL(", staff)
+        self.assertIn("Gorno-Altaisk State University", staff)
+        self.assertNotIn(AFFILIATION_ID, staff)
+        self.assertNotIn("AF-ID", staff)
 
     def test_since_founding_uses_1993(self):
         self.assertEqual(GASU_FOUNDED_YEAR, 1993)

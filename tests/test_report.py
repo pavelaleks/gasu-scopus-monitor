@@ -247,6 +247,43 @@ class ReportTests(unittest.TestCase):
         missing = [row["Автор"] for row in rsf_eligibility_rows(rsf_candidates(first_only), 5)]
         self.assertFalse(any("Safonova" in name for name in missing))
 
+    def test_rsf_profile_supplement_adds_safonova_when_papers_only_have_first_author(self):
+        from report import supplement_rsf_with_profiles
+
+        papers = [
+            {
+                "scopus_id": str(i),
+                "authors": [{"surname": "Frolov", "initials": "I.N.", "authid": "100"}],
+            }
+            for i in range(5)
+        ]
+        candidates = rsf_candidates(papers)
+        self.assertFalse(any("Safonova" in row["Автор"] for row in candidates))
+        profiles = [
+            {
+                "surname": "Safonova",
+                "given": "Varvara",
+                "initials": "V.Yu.",
+                "authid": "300",
+                "documents": 9,
+            }
+        ]
+        filled, added = supplement_rsf_with_profiles(
+            candidates,
+            profiles,
+            lambda authid: (5, 9) if authid == "300" else (0, 0),
+        )
+        self.assertEqual(added, 1)
+        names = [row["Автор"] for row in rsf_eligibility_rows(filled, 5)]
+        self.assertTrue(any("Safonova" in name for name in names))
+        skipped, skipped_n = supplement_rsf_with_profiles(
+            candidates,
+            profiles,
+            lambda _authid: (0, 20),
+        )
+        self.assertEqual(skipped_n, 0)
+        self.assertFalse(any("Safonova" in row["Автор"] for row in skipped))
+
 
 if __name__ == "__main__":
     unittest.main()

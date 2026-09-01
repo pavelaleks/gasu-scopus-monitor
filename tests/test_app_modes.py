@@ -66,6 +66,8 @@ class AppModeTests(unittest.TestCase):
         self.assertIn("Дополняем соавторов по карточкам статей и DOI, если Search отдал только первого...", text)
         self.assertIn('{"view": "FULL"}', text)
         self.assertIn("fetch_crossref_authors", text)
+        self.assertIn("add_gasu_staff_to_rsf", text)
+        self.assertIn("Ищем сотрудников ГАГУ в Scopus — не только первых авторов статей...", text)
         self.assertNotIn("if truncated and saved_mode in {MODE_UNIVERSITY, MODE_RSF}:", text)
         enrich_idx = text.index("enrich_record_authors(records, api_key)")
         authid_guard = text.find("if not authid_ready:", 0, enrich_idx)

@@ -1,3 +1,4 @@
+# Streamlit Cloud: pin deps; bump comment to force a clean rebuild (1.10.9)
 streamlit
 pandas
 requests

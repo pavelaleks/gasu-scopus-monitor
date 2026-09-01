@@ -20,6 +20,8 @@ from gasu import (
     more_scopus_pages,
     needs_author_enrichment,
     normalize_orcid,
+    paper_abstract_urls,
+    parse_author_count,
     orcid_id_query,
     parse_author_query,
     parse_author_retrieval,
@@ -365,6 +367,20 @@ class MultiAffiliationTests(unittest.TestCase):
 
     def test_needs_author_enrichment_when_list_is_truncated(self):
         self.assertFalse(needs_author_enrichment({"authors": [{"authid": "1"}]}))
+        self.assertFalse(
+            needs_author_enrichment(
+                {
+                    "scopus_id": "851",
+                    "author_count": 1,
+                    "authors": [{"surname": "Alekseev", "authid": "57200000001"}],
+                }
+            )
+        )
+        self.assertTrue(
+            needs_author_enrichment(
+                {"doi": "10.1016/j.foo.2020.01.001", "authors": [{"surname": "Alekseev"}]}
+            )
+        )
         self.assertTrue(
             needs_author_enrichment(
                 {"scopus_id": "851", "authors": [{"surname": "Alekseev", "authid": "57200000001"}]}
@@ -546,6 +562,43 @@ class MultiAffiliationTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertEqual(
+            truncated_author_paper_count(
+                [{"authors": [{"surname": "Solo"}], "author_count": 1}]
+            ),
+            0,
+        )
+        self.assertEqual(
+            truncated_author_paper_count(
+                [{"authors": [{"surname": "Alekseev"}], "author_count": 4}]
+            ),
+            1,
+        )
+
+    def test_paper_abstract_urls_try_eid_then_doi(self):
+        urls = paper_abstract_urls(
+            {
+                "scopus_id": "2-s2.0-85100000000",
+                "eid": "2-s2.0-85100000000",
+                "doi": "10.1016/j.foo.2020.01.001",
+            }
+        )
+        self.assertEqual(
+            urls[0],
+            "https://api.elsevier.com/content/abstract/eid/2-s2.0-85100000000",
+        )
+        self.assertEqual(
+            urls[-1],
+            "https://api.elsevier.com/content/abstract/doi/10.1016%2Fj.foo.2020.01.001",
+        )
+        self.assertEqual(len(urls), 2)
+        numeric = paper_abstract_urls({"scopus_id": "85100000000", "doi": "10.1/abc"})
+        self.assertEqual(
+            numeric[0],
+            "https://api.elsevier.com/content/abstract/scopus_id/85100000000",
+        )
+        self.assertEqual(parse_author_count({"author-count": {"@total": "5", "$": "5"}}), 5)
+        self.assertIsNone(parse_author_count({}))
 
     def test_records_sort_by_surname_then_newest_year(self):
         records = [

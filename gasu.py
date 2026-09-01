@@ -12,6 +12,7 @@ Scopus индексирует все аффилиации документа, п
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 # Исторический id из первой версии приложения. Не используем в запросе:
 # по нему Scopus отдавал чужие организации, а код ещё и подписывал их как ГАГУ.
@@ -888,18 +889,71 @@ def author_ids(authors: list[dict] | None) -> list[str]:
     return ids
 
 
+def parse_author_count(entry: dict) -> int | None:
+    """Сколько авторов в статье по полю author-count (COMPLETE view)."""
+    if not isinstance(entry, dict):
+        return None
+    raw = entry.get("author-count")
+    if isinstance(raw, dict):
+        raw = raw.get("@total") or raw.get("$") or raw.get("#text")
+    try:
+        count = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def paper_abstract_urls(record: dict) -> list[str]:
+    """Abstract Retrieval: eid, Scopus ID, DOI — в таком порядке."""
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(kind: str, ident: str) -> None:
+        ident = (ident or "").strip()
+        if not ident:
+            return
+        if kind == "doi":
+            ident = quote(ident, safe="")
+        url = f"https://api.elsevier.com/content/abstract/{kind}/{ident}"
+        if url in seen:
+            return
+        seen.add(url)
+        urls.append(url)
+
+    sid = (record.get("scopus_id") or "").strip()
+    eid = (record.get("eid") or "").strip()
+    if sid.startswith("2-s2.0-"):
+        add("eid", sid)
+    elif sid:
+        add("scopus_id", sid)
+    add("eid", eid)
+    add("doi", record.get("doi") or "")
+    return urls
+
+
+def authors_look_truncated(record: dict) -> bool:
+    authors = record.get("authors") or []
+    expected = record.get("author_count")
+    if isinstance(expected, int) and expected > 0:
+        return len(authors) < expected
+    return len(authors) < 2
+
+
 def needs_author_enrichment(record: dict) -> bool:
     """Search API часто отдаёт только первого автора и без Author ID."""
-    if not (record.get("scopus_id") or "").strip():
+    if not ((record.get("scopus_id") or "").strip() or (record.get("doi") or "").strip() or (record.get("eid") or "").strip()):
         return False
     authors = record.get("authors") or []
-    if len(authors) < 2:
+    expected = record.get("author_count")
+    if isinstance(expected, int) and expected == 1 and len(authors) == 1 and author_ids(authors):
+        return False
+    if authors_look_truncated(record):
         return True
     return len(author_ids(authors)) < len(authors)
 
 
 def truncated_author_paper_count(records: list[dict]) -> int:
-    return sum(1 for rec in records or [] if len(rec.get("authors") or []) < 2)
+    return sum(1 for rec in records or [] if authors_look_truncated(rec))
 
 
 def record_sort_key(record: dict) -> tuple[str, int, str]:

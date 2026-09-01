@@ -35,7 +35,9 @@ from gasu import (
     pick_scopus_authid,
     profile_display_name,
     more_scopus_pages,
+    paper_abstract_urls,
     paper_authors_matching,
+    parse_author_count,
     profile_metrics_from_papers,
     authid_on_every_paper,
     seed_profile_from_authors,
@@ -83,15 +85,14 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AUTHOR_URL = "https://api.elsevier.com/content/search/author"
-ABSTRACT_URL = "https://api.elsevier.com/content/abstract"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
     "prism:doi,prism:volume,prism:issueIdentifier,prism:pageRange,"
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.5"
-APP_UPDATED_FALLBACK = "31.08.2026"
+APP_VERSION = "1.10.6"
+APP_UPDATED_FALLBACK = "01.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
 MODE_AUTHOR = "Поиск по автору"
@@ -317,7 +318,8 @@ def render_how_we_count(mode: str, window) -> None:
             st.markdown(
                 "В список входят записи, где Scopus показывает ГАГУ по названию или городу "
                 "(в том числе как одну из нескольких аффилиаций). "
-                "Соавторы учитываются, если они есть в ответе по статье. "
+                "Scopus Search часто отдаёт только первого автора; остальных "
+                "добираем через Abstract Retrieval по Scopus ID или DOI, если ключ это разрешает. "
                 "Полный список работ человека — режим «Поиск по автору». "
                 "Потенциальные грантодержатели — режим «РНФ»."
             )
@@ -333,6 +335,7 @@ def render_how_we_count(mode: str, window) -> None:
             st.markdown(
                 "Карточка сверху — показатели профиля Scopus за всю карьеру. "
                 "Таблица ниже — только работы за выбранный период. "
+                "Соавторов Search часто обрезает до первого имени — добираем через Abstract Retrieval. "
                 "Надёжнее ORCID или Scopus Author ID: фамилия может дать однофамильцев."
             )
 
@@ -451,51 +454,44 @@ def resolve_scopus_authid(surname: str, initials: str, given: str, api_key: str)
     return (resolve_author_profile(surname, initials, given, api_key).get("authid") or "").strip()
 
 
-def _abstract_targets(record: dict) -> list[tuple[str, str]]:
-    targets: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add(kind: str, ident: str) -> None:
-        ident = (ident or "").strip()
-        if not ident or (kind, ident) in seen:
-            return
-        seen.add((kind, ident))
-        targets.append((kind, ident))
-
-    sid = (record.get("scopus_id") or "").strip()
-    eid = (record.get("eid") or "").strip()
-    if sid.startswith("2-s2.0-"):
-        add("eid", sid)
-    elif sid:
-        add("scopus_id", sid)
-    add("eid", eid)
-    return targets
+def _abstract_get(url: str, headers: dict, params: dict | None) -> tuple[list[dict], int]:
+    last_status = 0
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, params=params or None, timeout=45)
+        except requests.RequestException:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        last_status = response.status_code
+        if response.status_code == 429:
+            time.sleep(2 * (attempt + 1))
+            continue
+        if response.status_code != 200:
+            return [], last_status
+        try:
+            authors = parse_authors(response.json())
+        except Exception:
+            return [], last_status
+        return authors, last_status
+    return [], last_status
 
 
 def fetch_paper_authors(record: dict, api_key: str) -> tuple[list[dict], int]:
+    """Abstract Retrieval: полный список авторов, если ключ открывает этот API."""
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     last_status = 0
-    for kind, ident in _abstract_targets(record):
-        url = f"{ABSTRACT_URL}/{kind}/{ident}"
-        for attempt in range(3):
-            try:
-                response = requests.get(url, headers=headers, timeout=45)
-            except requests.RequestException:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            last_status = response.status_code
-            if response.status_code == 429:
-                time.sleep(2 * (attempt + 1))
-                continue
-            if response.status_code != 200:
-                break
-            try:
-                authors = parse_authors(response.json())
-            except Exception:
-                return [], last_status
+    for url in paper_abstract_urls(record):
+        authors, last_status = _abstract_get(url, headers, None)
+        if authors:
+            return authors, last_status
+        if last_status in {401, 403}:
+            return [], last_status
+        if last_status == 200:
+            authors, full_status = _abstract_get(url, headers, {"view": "FULL"})
+            if full_status:
+                last_status = full_status
             if authors:
                 return authors, last_status
-            break
     return [], last_status
 
 
@@ -505,7 +501,7 @@ def enrich_record_authors(records: list[dict], api_key: str) -> int:
     if not todo:
         return 0
     sample, status = fetch_paper_authors(todo[0], api_key)
-    if status in {401, 403, 404} and not sample:
+    if status in {401, 403} and not sample:
         return 0
     if sample:
         todo[0]["authors"] = sample
@@ -741,6 +737,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                     "scopus_id": (entry.get("dc:identifier") or "").replace("SCOPUS_ID:", ""),
                     "eid": (entry.get("eid") or "").strip(),
                     "authors": parse_authors(entry),
+                    "author_count": parse_author_count(entry),
                     "affiliation": format_affiliations(entry),
                     "issns": extract_issns(entry),
                     "cited_by_count": _field_int(entry.get("citedby-count")),
@@ -1314,21 +1311,17 @@ if search_clicked:
         st.info("Статей по данному запросу не найдено.")
         st.stop()
 
-    if mode in {MODE_UNIVERSITY, MODE_RSF}:
-        with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
+    with st.spinner("Дополняем соавторов по карточкам статей, если API это позволяет..."):
+        try:
             enrich_record_authors(records, api_key)
-        if mode == MODE_RSF:
-            with st.spinner("Сопоставляем авторов с профилями Scopus..."):
-                stamp_author_profiles(records, api_key)
+        except Exception:
+            pass
+    if mode == MODE_RSF:
+        with st.spinner("Сопоставляем авторов с профилями Scopus..."):
+            stamp_author_profiles(records, api_key)
         st.session_state.pop("target_profile", None)
-    else:
+    elif mode == MODE_AUTHOR:
         authid_ready = "".join(ch for ch in str(target_profile.get("authid") or "") if ch.isdigit())
-        if not authid_ready:
-            with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
-                try:
-                    enrich_record_authors(records, api_key)
-                except Exception:
-                    pass
         if (
             not authid_ready
             or target_profile.get("h_index") is None
@@ -1343,6 +1336,8 @@ if search_clicked:
                     surname=author_last,
                 )
         st.session_state["target_profile"] = target_profile
+    else:
+        st.session_state.pop("target_profile", None)
 
     st.session_state["records"] = records
     st.session_state["date_filter"] = date_filter
@@ -1429,9 +1424,11 @@ elif has_records:
     elif saved_mode == MODE_RSF:
         st.caption("Таблица — статьи ГАГУ в окне конкурса. Порог выше считает все Scopus-работы автора.")
     truncated = truncated_author_paper_count(records)
-    if truncated and saved_mode in {MODE_UNIVERSITY, MODE_RSF}:
+    if truncated:
         st.caption(
-            f"У {truncated} из {len(records)} статей Scopus отдал только одного автора."
+            f"У {truncated} из {len(records)} статей Scopus Search отдал неполный список авторов "
+            "(часто только первого). Соавторов добираем через Abstract Retrieval — "
+            "отдельный запрос на статью. Если ключ этот API не открывает, в таблице останется первый автор."
         )
 
     df = records_to_dataframe(records_for_list)

@@ -9,6 +9,7 @@ from gasu import (
     author_ids,
     author_papers_query,
     author_profile_query,
+    author_retrieval_urls,
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
@@ -126,6 +127,21 @@ class GasuQueryTests(unittest.TestCase):
         self.assertEqual(surname["surname"], "Сафонова")
         self.assertEqual(surname["orcid"], "")
         self.assertEqual(parse_author_query(""), {"kind": "", "orcid": "", "authid": "", "surname": ""})
+
+    def test_author_retrieval_urls_include_orcid_path(self):
+        urls = author_retrieval_urls("", "https://orcid.org/0000-0003-3680-1785")
+        self.assertEqual(
+            urls,
+            ["https://api.elsevier.com/content/author/orcid/0000-0003-3680-1785"],
+        )
+        both = author_retrieval_urls("58102647800", "0000-0003-3680-1785")
+        self.assertEqual(
+            both,
+            [
+                "https://api.elsevier.com/content/author/author_id/58102647800",
+                "https://api.elsevier.com/content/author/orcid/0000-0003-3680-1785",
+            ],
+        )
 
     def test_author_search_with_orcid_is_person_query(self):
         query = build_query(

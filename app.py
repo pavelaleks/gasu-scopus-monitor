@@ -18,6 +18,7 @@ from gasu import (
     author_id_query,
     author_papers_query,
     author_profile_query,
+    author_retrieval_urls,
     author_search_id,
     build_query,
     entry_belongs_to_gasu,
@@ -80,7 +81,6 @@ except Exception:
 
 API_URL = "https://api.elsevier.com/content/search/scopus"
 AUTHOR_URL = "https://api.elsevier.com/content/search/author"
-AUTHOR_RETRIEVAL_URL = "https://api.elsevier.com/content/author/author_id"
 ABSTRACT_URL = "https://api.elsevier.com/content/abstract"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
@@ -88,7 +88,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.10.4"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -529,33 +529,32 @@ def fetch_author_metrics(
     authid: str,
     api_key: str,
     *,
+    orcid: str = "",
     views: tuple[str | None, ...] = ("ENHANCED", "METRICS", None),
 ) -> dict:
-    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
-    if not ident:
+    urls = author_retrieval_urls(authid, orcid)
+    if not urls:
         return {}
     headers = {"X-ELS-APIKey": api_key, "Accept": "application/json"}
     merged: dict = {}
-    for view in views:
-        params = {"view": view} if view else {}
-        try:
-            response = requests.get(
-                f"{AUTHOR_RETRIEVAL_URL}/{ident}",
-                headers=headers,
-                params=params,
-                timeout=45,
-            )
-        except requests.RequestException:
-            continue
-        if response.status_code != 200:
-            continue
-        try:
-            parsed = parse_author_retrieval(response.json())
-        except Exception:
-            continue
-        apply_author_profile(merged, parsed)
-        if merged.get("h_index") is not None and (merged.get("surname") or merged.get("documents") is not None):
-            break
+    for url in urls:
+        for view in views:
+            params = {"view": view} if view else {}
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=45)
+            except requests.RequestException:
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                parsed = parse_author_retrieval(response.json())
+            except Exception:
+                continue
+            apply_author_profile(merged, parsed)
+            if merged.get("h_index") is not None and (
+                merged.get("surname") or merged.get("documents") is not None
+            ):
+                return merged
     return merged
 
 
@@ -567,8 +566,10 @@ def complete_author_profile(
     orcid: str = "",
     surname: str = "",
 ) -> dict:
-    """Author ID со статей + Author Retrieval / Author Search, если профиль пустой."""
+    """ORCID/AU-ID → Author Retrieval; иначе Author ID со статей и Author Search."""
     filled = dict(profile or {})
+    if orcid and not filled.get("orcid"):
+        filled["orcid"] = normalize_orcid(orcid)
     matches = paper_authors_matching(
         records,
         authid=filled.get("authid") or "",
@@ -580,22 +581,22 @@ def complete_author_profile(
         shared = authid_on_every_paper(records)
         if shared:
             filled["authid"] = shared
-    authid = "".join(ch for ch in str(filled.get("authid") or "") if ch.isdigit())
-    if authid and (filled.get("h_index") is None or filled.get("documents") is None):
-        extra = fetch_author_metrics(authid, api_key)
+    if filled.get("h_index") is None or filled.get("documents") is None:
+        extra = fetch_author_metrics(filled.get("authid") or "", api_key, orcid=orcid or filled.get("orcid") or "")
         if extra:
             apply_author_profile(filled, extra)
+    authid = "".join(ch for ch in str(filled.get("authid") or "") if ch.isdigit())
     if authid and (filled.get("h_index") is None or filled.get("documents") is None):
         entries = _author_search_entries(f"AU-ID({authid})", api_key)
         if len(entries) == 1:
             apply_author_profile(filled, parse_author_search_profile(entries[0]))
-        elif orcid:
-            entries = _author_search_entries(
-                f"ORCID({quoted(normalize_orcid(orcid))})",
-                api_key,
-            )
+    if orcid and (filled.get("h_index") is None or filled.get("documents") is None):
+        oid = quoted(normalize_orcid(orcid))
+        for query in (f"ORCID({oid})", f"ORCID({normalize_orcid(orcid)})"):
+            entries = _author_search_entries(query, api_key)
             if len(entries) == 1:
                 apply_author_profile(filled, parse_author_search_profile(entries[0]))
+                break
     return filled
 
 
@@ -880,33 +881,35 @@ def render_scopus_profile_card(profile: dict, *, fallback_name: str = "") -> Non
     authid = (profile.get("authid") or "").strip()
     orcid = (profile.get("orcid") or "").strip()
     affil = (profile.get("profile_affil") or "").strip()
-    st.subheader(name or "Профиль Scopus")
-    if affil:
-        st.write(affil)
-    links = []
-    if authid:
-        links.append(f"Scopus ID: [{authid}](https://www.scopus.com/authid/detail.uri?authorId={authid})")
-    if orcid:
-        links.append(f"ORCID: [{orcid}](https://orcid.org/{orcid})")
-    if links:
-        st.markdown(" · ".join(links))
-    citations = profile.get("citations")
-    cited_by = profile.get("cited_by")
-    if citations is None:
-        citations = cited_by
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Цитирования", _metric_text(citations))
-    if cited_by is not None:
-        c1.caption(f"в {cited_by} документах")
-    c2.metric("Документы", _metric_text(profile.get("documents")))
-    c3.metric("h-индекс", _metric_text(profile.get("h_index")))
-    if citations is None and profile.get("documents") is None and profile.get("h_index") is None:
-        st.caption("Scopus не вернул показатели профиля для этого запроса. Если есть Scopus ID — откройте страницу автора по ссылке.")
-    else:
-        st.caption(
-            "Показатели профиля Scopus за всю карьеру — как на странице автора. "
-            "Ниже — только работы за выбранный период поиска."
-        )
+    with st.container(border=True):
+        st.caption("Карьера в Scopus")
+        st.markdown(f"**{name or 'Профиль Scopus'}**")
+        if affil:
+            st.write(affil)
+        links = []
+        if authid:
+            links.append(f"Scopus ID: [{authid}](https://www.scopus.com/authid/detail.uri?authorId={authid})")
+        if orcid:
+            links.append(f"ORCID: [{orcid}](https://orcid.org/{orcid})")
+        if links:
+            st.markdown(" · ".join(links))
+        citations = profile.get("citations")
+        cited_by = profile.get("cited_by")
+        if citations is None:
+            citations = cited_by
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Цитирования", _metric_text(citations))
+        if cited_by is not None:
+            c1.caption(f"в {cited_by} документах")
+        c2.metric("Документы", _metric_text(profile.get("documents")))
+        c3.metric("h-индекс", _metric_text(profile.get("h_index")))
+        if citations is None and profile.get("documents") is None and profile.get("h_index") is None:
+            st.caption(
+                "Scopus не вернул показатели профиля для этого ключа API. "
+                "Цифры карьеры приходят из Author Retrieval; список работ ниже — из поиска статей."
+            )
+        else:
+            st.caption("Как на странице автора в Scopus. Ниже — только работы за выбранный период.")
 
 
 def render_report_block(
@@ -1203,6 +1206,7 @@ if search_clicked:
         elif author_orcid:
             ident = normalize_orcid(author_orcid)
             identity = "orcid"
+            target_profile = {"orcid": ident}
             query = build_query(mode, author_last, ident, date_filter, only_gasu)
             orcid_entries = _author_search_entries(f"ORCID({quoted(ident)})", api_key)
             ids = list(
@@ -1235,9 +1239,13 @@ if search_clicked:
             else:
                 identity = "surname"
                 query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
-        if target_profile.get("authid"):
+        if target_profile.get("authid") or author_orcid:
             with st.spinner("Загружаем профиль Scopus..."):
-                extra = fetch_author_metrics(target_profile["authid"], api_key)
+                extra = fetch_author_metrics(
+                    target_profile.get("authid") or "",
+                    api_key,
+                    orcid=author_orcid or target_profile.get("orcid") or "",
+                )
                 if extra:
                     apply_author_profile(target_profile, extra)
     else:
@@ -1382,6 +1390,7 @@ elif has_records:
 
     slice_report = build_report(records)
     requested = period_span_label(st.session_state.get("date_filter"))
+    st.caption("Выборка за выбранный период")
     kpi1, kpi2, kpi3 = st.columns(3)
     kpi1.metric("Публикаций в срезе", slice_report.total)
     kpi2.metric("Период", requested)

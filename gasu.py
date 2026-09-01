@@ -117,6 +117,18 @@ def parse_author_query(value: str) -> dict:
     return {"kind": "surname", "orcid": "", "authid": "", "surname": surname}
 
 
+def author_retrieval_urls(authid: str = "", orcid: str = "") -> list[str]:
+    """Author Retrieval принимает и Author ID, и ORCID — без предварительного Author Search."""
+    urls: list[str] = []
+    ident = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    if ident:
+        urls.append(f"https://api.elsevier.com/content/author/author_id/{ident}")
+    oid = normalize_orcid(orcid)
+    if oid:
+        urls.append(f"https://api.elsevier.com/content/author/orcid/{oid}")
+    return urls
+
+
 def gasu_affiliation_clause() -> str:
     """Только узнаваемые имена вуза, без акронима GASU и без AF-ID."""
     names = " OR ".join(f"AFFILORG({quoted(name)})" for name in AFFILIATION_NAMES)

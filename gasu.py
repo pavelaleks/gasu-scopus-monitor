@@ -566,7 +566,7 @@ def profile_display_name(profile: dict, fallback: str = "") -> str:
 def apply_author_profile(author: dict, profile: dict) -> dict:
     if not isinstance(author, dict) or not isinstance(profile, dict):
         return author
-    for key in ("authid", "orcid", "profile_affil", "surname", "given", "initials"):
+    for key in ("authid", "orcid", "profile_affil", "surname", "given", "initials", "metrics_source"):
         if profile.get(key) and not author.get(key):
             author[key] = profile[key]
     for key in ("documents", "cited_by", "citations", "h_index", "coauthors"):
@@ -636,6 +636,34 @@ def seed_profile_from_authors(authors: list[dict]) -> dict:
         if len(ids) == 1:
             profile["authid"] = ids[0]
     return profile
+
+
+def h_index_from_citation_counts(counts: list[int]) -> int:
+    ranked = sorted((max(0, int(n)) for n in counts), reverse=True)
+    h = 0
+    for index, cites in enumerate(ranked, start=1):
+        if cites >= index:
+            h = index
+        else:
+            break
+    return h
+
+
+def profile_metrics_from_papers(records: list[dict]) -> dict:
+    """Документы, сумма citedby-count и h-индекс по статьям поиска — запасной путь без Author Retrieval."""
+    if not records:
+        return {}
+    counts: list[int] = []
+    for rec in records:
+        value = rec.get("cited_by_count")
+        parsed = _field_int(value)
+        counts.append(0 if parsed is None else parsed)
+    return {
+        "documents": len(records),
+        "citations": sum(counts),
+        "h_index": h_index_from_citation_counts(counts),
+        "metrics_source": "papers",
+    }
 
 
 def _author_entry_initial(entry: dict) -> str:

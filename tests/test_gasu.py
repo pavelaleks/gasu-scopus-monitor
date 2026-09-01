@@ -14,6 +14,7 @@ from gasu import (
     entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
+    h_index_from_citation_counts,
     has_gasu_affiliation,
     match_authid_on_paper,
     more_scopus_pages,
@@ -30,6 +31,7 @@ from gasu import (
     seed_profile_from_authors,
     pick_scopus_authid,
     profile_display_name,
+    profile_metrics_from_papers,
     record_has_gasu,
     record_sort_key,
     scopus_authid,
@@ -503,6 +505,25 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertEqual(seed["authid"], "58102647800")
         self.assertEqual(seed["surname"], "Alekseev")
         self.assertEqual(authid_on_every_paper(records), "58102647800")
+
+    def test_h_index_and_metrics_from_paper_citedby(self):
+        self.assertEqual(h_index_from_citation_counts([10, 8, 5, 4, 3, 1]), 4)
+        self.assertEqual(h_index_from_citation_counts([0, 0]), 0)
+        self.assertEqual(h_index_from_citation_counts([5]), 1)
+        metrics = profile_metrics_from_papers(
+            [
+                {"cited_by_count": 10},
+                {"cited_by_count": 8},
+                {"cited_by_count": 5},
+                {"cited_by_count": 4},
+                {"cited_by_count": 3},
+                {"cited_by_count": 1},
+            ]
+        )
+        self.assertEqual(metrics["documents"], 6)
+        self.assertEqual(metrics["citations"], 31)
+        self.assertEqual(metrics["h_index"], 4)
+        self.assertEqual(metrics["metrics_source"], "papers")
 
     def test_parse_author_text_keeps_coauthors_not_only_first(self):
         names = [item["surname"] for item in parse_author_text(

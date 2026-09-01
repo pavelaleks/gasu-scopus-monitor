@@ -24,6 +24,7 @@ from gasu import (
     entry_belongs_to_gasu,
     first_initial,
     format_affiliations,
+    _field_int,
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
@@ -35,6 +36,7 @@ from gasu import (
     profile_display_name,
     more_scopus_pages,
     paper_authors_matching,
+    profile_metrics_from_papers,
     authid_on_every_paper,
     seed_profile_from_authors,
     query_targets_gasu,
@@ -85,10 +87,10 @@ ABSTRACT_URL = "https://api.elsevier.com/content/abstract"
 SEARCH_FIELDS = (
     "dc:identifier,dc:title,dc:creator,prism:coverDate,prism:publicationName,"
     "prism:doi,prism:volume,prism:issueIdentifier,prism:pageRange,"
-    "prism:issn,prism:eIssn,author,affiliation"
+    "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.4"
+APP_VERSION = "1.10.5"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -597,6 +599,23 @@ def complete_author_profile(
             if len(entries) == 1:
                 apply_author_profile(filled, parse_author_search_profile(entries[0]))
                 break
+    if filled.get("h_index") is None or filled.get("documents") is None:
+        career_query = ""
+        authid = "".join(ch for ch in str(filled.get("authid") or "") if ch.isdigit())
+        if authid:
+            career_query = f"AU-ID({authid})"
+        elif orcid:
+            career_query = f"ORCID({quoted(normalize_orcid(orcid))})"
+        papers = records
+        if career_query:
+            try:
+                papers = fetch_scopus_data(career_query, api_key, None)
+            except Exception:
+                papers = records
+        extra = profile_metrics_from_papers(papers)
+        if extra:
+            apply_author_profile(filled, extra)
+            filled["metrics_source"] = extra.get("metrics_source") or "papers"
     return filled
 
 
@@ -724,6 +743,7 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
                     "authors": parse_authors(entry),
                     "affiliation": format_affiliations(entry),
                     "issns": extract_issns(entry),
+                    "cited_by_count": _field_int(entry.get("citedby-count")),
                 }
             )
             if max_results and len(records) >= max_results:
@@ -903,10 +923,14 @@ def render_scopus_profile_card(profile: dict, *, fallback_name: str = "") -> Non
             c1.caption(f"в {cited_by} документах")
         c2.metric("Документы", _metric_text(profile.get("documents")))
         c3.metric("h-индекс", _metric_text(profile.get("h_index")))
-        if citations is None and profile.get("documents") is None and profile.get("h_index") is None:
+        if profile.get("metrics_source") == "papers":
             st.caption(
-                "Scopus не вернул показатели профиля для этого ключа API. "
-                "Цифры карьеры приходят из Author Retrieval; список работ ниже — из поиска статей."
+                "Посчитано по всем статьям автора в Scopus: этот API-ключ не отдаёт официальный "
+                "Author Retrieval. Цитирования — сумма cited-by статей, h-индекс — по ним же."
+            )
+        elif citations is None and profile.get("documents") is None and profile.get("h_index") is None:
+            st.caption(
+                "Scopus не вернул показатели профиля. Список работ ниже — из поиска статей."
             )
         else:
             st.caption("Как на странице автора в Scopus. Ниже — только работы за выбранный период.")

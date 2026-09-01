@@ -24,6 +24,9 @@ from gasu import (
     parse_author_search_profile,
     parse_author_text,
     parse_authors,
+    paper_authors_matching,
+    authid_on_every_paper,
+    seed_profile_from_authors,
     pick_scopus_authid,
     profile_display_name,
     record_has_gasu,
@@ -443,6 +446,47 @@ class MultiAffiliationTests(unittest.TestCase):
         self.assertEqual(profile_display_name(retrieval), "Safonova, Varvara Yu")
         self.assertIn("Gorno-Altaisk", retrieval["profile_affil"])
         self.assertIn("Russian Federation", retrieval["profile_affil"])
+        nested = parse_author_retrieval(
+            {
+                "author-retrieval-response": {
+                    "metrics": {"h-index": 4, "document-count": 13, "cited-by-count": 10},
+                    "coredata": {"dc:identifier": "AUTHOR_ID:58102647800", "document-count": "13"},
+                    "author-profile": {"preferred-name": {"surname": "Alekseev", "given-name": "Pavel"}},
+                }
+            }
+        )
+        self.assertEqual(nested["h_index"], 4)
+        self.assertEqual(nested["documents"], 13)
+        self.assertEqual(nested["cited_by"], 10)
+
+    def test_profile_seed_from_found_papers(self):
+        records = [
+            {
+                "authors": [
+                    {
+                        "surname": "Alekseev",
+                        "given": "Pavel",
+                        "authid": "58102647800",
+                        "orcid": "0000-0003-3680-1785",
+                    },
+                    {"surname": "Kyrov", "authid": "11111111111"},
+                ]
+            },
+            {
+                "authors": [
+                    {"surname": "Alekseev", "authid": "58102647800"},
+                    {"surname": "Ivanov", "authid": "22222222222"},
+                ]
+            },
+        ]
+        hits = paper_authors_matching(
+            records, orcid="https://orcid.org/0000-0003-3680-1785"
+        )
+        self.assertEqual(hits[0]["authid"], "58102647800")
+        seed = seed_profile_from_authors(hits)
+        self.assertEqual(seed["authid"], "58102647800")
+        self.assertEqual(seed["surname"], "Alekseev")
+        self.assertEqual(authid_on_every_paper(records), "58102647800")
 
     def test_parse_author_text_keeps_coauthors_not_only_first(self):
         names = [item["surname"] for item in parse_author_text(

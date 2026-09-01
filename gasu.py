@@ -424,6 +424,12 @@ def _field_text(value: object) -> str:
 
 
 def _field_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
     text = _field_text(value).replace(",", "").replace(" ", "")
     if text.isdigit():
         return int(text)
@@ -503,17 +509,29 @@ def parse_author_retrieval(payload: dict) -> dict:
         aff.get("affiliation-city") or address.get("city"),
         aff.get("affiliation-country") or address.get("country"),
     )
+    metrics = inner.get("metrics") if isinstance(inner.get("metrics"), dict) else {}
     return {
         "authid": author_search_id(core) or author_search_id(inner),
         "orcid": orcid,
-        "documents": _field_int(core.get("document-count") or inner.get("document-count")),
-        "cited_by": _field_int(core.get("cited-by-count") or inner.get("cited-by-count")),
+        "documents": _field_int(
+            core.get("document-count") or inner.get("document-count") or metrics.get("document-count")
+        ),
+        "cited_by": _field_int(
+            core.get("cited-by-count") or inner.get("cited-by-count") or metrics.get("cited-by-count")
+        ),
         "citations": _field_int(
             core.get("citation-count")
             or core.get("citations-count")
             or inner.get("citation-count")
+            or profile.get("citation-count")
+            or metrics.get("citation-count")
         ),
-        "h_index": _field_int(inner.get("h-index") or core.get("h-index") or profile.get("h-index")),
+        "h_index": _field_int(
+            inner.get("h-index")
+            or core.get("h-index")
+            or profile.get("h-index")
+            or metrics.get("h-index")
+        ),
         "coauthors": _field_int(inner.get("coauthor-count") or core.get("coauthor-count")),
         "profile_affil": affil,
         "surname": _field_text(pref.get("surname") or profile.get("surname")),
@@ -543,6 +561,69 @@ def apply_author_profile(author: dict, profile: dict) -> dict:
         if author.get(key) in (None, "") and profile.get(key) is not None:
             author[key] = profile[key]
     return author
+
+
+def paper_authors_matching(
+    records: list[dict],
+    *,
+    authid: str = "",
+    orcid: str = "",
+    surname: str = "",
+) -> list[dict]:
+    """Авторы на уже найденных статьях, совпадающие с запросом."""
+    wanted_id = "".join(ch for ch in str(authid or "") if ch.isdigit())
+    wanted_orcid = normalize_orcid(orcid).lower()
+    wanted_sur = (surname or "").strip().lower()
+    hits: list[dict] = []
+    for rec in records or []:
+        for author in rec.get("authors") or []:
+            if not isinstance(author, dict):
+                continue
+            if wanted_id and (author.get("authid") or "") == wanted_id:
+                hits.append(author)
+                continue
+            author_orcid = normalize_orcid(author.get("orcid") or "").lower()
+            if wanted_orcid and author_orcid and author_orcid == wanted_orcid:
+                hits.append(author)
+                continue
+            if wanted_sur and (author.get("surname") or "").strip().lower() == wanted_sur:
+                hits.append(author)
+    return hits
+
+
+def authid_on_every_paper(records: list[dict]) -> str:
+    """Author ID, который есть на каждой статье — обычно сам искомый автор."""
+    common: set[str] | None = None
+    for rec in records or []:
+        ids = set(author_ids(rec.get("authors") or []))
+        if not ids:
+            return ""
+        common = ids if common is None else common & ids
+        if not common:
+            return ""
+    if common and len(common) == 1:
+        return next(iter(common))
+    return ""
+
+
+def seed_profile_from_authors(authors: list[dict]) -> dict:
+    profile: dict = {}
+    for author in authors or []:
+        apply_author_profile(
+            profile,
+            {
+                "authid": author.get("authid") or "",
+                "orcid": author.get("orcid") or "",
+                "surname": author.get("surname") or "",
+                "given": author.get("given") or "",
+                "initials": author.get("initials") or "",
+            },
+        )
+    if not profile.get("authid"):
+        ids = author_ids(authors)
+        if len(ids) == 1:
+            profile["authid"] = ids[0]
+    return profile
 
 
 def _author_entry_initial(entry: dict) -> str:
@@ -743,12 +824,16 @@ def parse_author_item(item: dict) -> dict | None:
     authid = scopus_authid(item) or scopus_authid(preferred)
     if not surname and not authid:
         return None
+    orcid = normalize_orcid(
+        _field_text(item.get("orcid") or preferred.get("orcid") or item.get("ORCID") or "")
+    )
     return {
         "surname": surname,
         "given": given,
         "initials": initials,
         "from_gasu": author_belongs_to_gasu(item),
         "authid": authid,
+        "orcid": orcid,
     }
 
 

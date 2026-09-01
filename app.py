@@ -33,6 +33,9 @@ from gasu import (
     pick_scopus_authid,
     profile_display_name,
     more_scopus_pages,
+    paper_authors_matching,
+    authid_on_every_paper,
+    seed_profile_from_authors,
     query_targets_gasu,
     quoted,
     record_sort_key,
@@ -85,7 +88,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.2"
+APP_VERSION = "1.10.3"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -556,6 +559,46 @@ def fetch_author_metrics(
     return merged
 
 
+def complete_author_profile(
+    profile: dict,
+    records: list[dict],
+    api_key: str,
+    *,
+    orcid: str = "",
+    surname: str = "",
+) -> dict:
+    """Author ID со статей + Author Retrieval / Author Search, если профиль пустой."""
+    filled = dict(profile or {})
+    matches = paper_authors_matching(
+        records,
+        authid=filled.get("authid") or "",
+        orcid=orcid,
+        surname=surname,
+    )
+    apply_author_profile(filled, seed_profile_from_authors(matches))
+    if not "".join(ch for ch in str(filled.get("authid") or "") if ch.isdigit()):
+        shared = authid_on_every_paper(records)
+        if shared:
+            filled["authid"] = shared
+    authid = "".join(ch for ch in str(filled.get("authid") or "") if ch.isdigit())
+    if authid and (filled.get("h_index") is None or filled.get("documents") is None):
+        extra = fetch_author_metrics(authid, api_key)
+        if extra:
+            apply_author_profile(filled, extra)
+    if authid and (filled.get("h_index") is None or filled.get("documents") is None):
+        entries = _author_search_entries(f"AU-ID({authid})", api_key)
+        if len(entries) == 1:
+            apply_author_profile(filled, parse_author_search_profile(entries[0]))
+        elif orcid:
+            entries = _author_search_entries(
+                f"ORCID({quoted(normalize_orcid(orcid))})",
+                api_key,
+            )
+            if len(entries) == 1:
+                apply_author_profile(filled, parse_author_search_profile(entries[0]))
+    return filled
+
+
 def stamp_author_profiles(records: list[dict], api_key: str) -> int:
     """Author Search + Retrieval: Author ID, ORCID, h-index и счётчики профиля."""
     groups: dict[str, list[dict]] = {}
@@ -857,10 +900,13 @@ def render_scopus_profile_card(profile: dict, *, fallback_name: str = "") -> Non
         c1.caption(f"в {cited_by} документах")
     c2.metric("Документы", _metric_text(profile.get("documents")))
     c3.metric("h-индекс", _metric_text(profile.get("h_index")))
-    st.caption(
-        "Показатели профиля Scopus за всю карьеру — как на странице автора. "
-        "Ниже — только работы за выбранный период поиска."
-    )
+    if citations is None and profile.get("documents") is None and profile.get("h_index") is None:
+        st.caption("Scopus не вернул показатели профиля для этого запроса. Если есть Scopus ID — откройте страницу автора по ссылке.")
+    else:
+        st.caption(
+            "Показатели профиля Scopus за всю карьеру — как на странице автора. "
+            "Ниже — только работы за выбранный период поиска."
+        )
 
 
 def render_report_block(
@@ -1244,6 +1290,26 @@ if search_clicked:
                 stamp_author_profiles(records, api_key)
         st.session_state.pop("target_profile", None)
     else:
+        authid_ready = "".join(ch for ch in str(target_profile.get("authid") or "") if ch.isdigit())
+        if not authid_ready:
+            with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
+                try:
+                    enrich_record_authors(records, api_key)
+                except Exception:
+                    pass
+        if (
+            not authid_ready
+            or target_profile.get("h_index") is None
+            or target_profile.get("documents") is None
+        ):
+            with st.spinner("Загружаем профиль Scopus..."):
+                target_profile = complete_author_profile(
+                    target_profile,
+                    records,
+                    api_key,
+                    orcid=author_orcid,
+                    surname=author_last,
+                )
         st.session_state["target_profile"] = target_profile
 
     st.session_state["records"] = records

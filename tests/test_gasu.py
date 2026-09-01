@@ -15,6 +15,7 @@ from gasu import (
     gasu_affiliation_clause,
     has_gasu_affiliation,
     match_authid_on_paper,
+    more_scopus_pages,
     needs_author_enrichment,
     normalize_orcid,
     orcid_id_query,
@@ -68,6 +69,38 @@ class GasuQueryTests(unittest.TestCase):
         self.assertIn("PUBYEAR IS 2026", query)
         self.assertNotIn("AF-ID(", query)
         self.assertNotIn('AFFIL("GASU")', query)
+
+    def test_last_five_years_use_pubyear_range_not_current_year(self):
+        query = build_query(
+            "Мониторинг ГАГУ",
+            "",
+            "",
+            {"mode": "range", "year": 2026, "year_start": 2022, "year_end": 2026},
+            False,
+        )
+        self.assertIn("PUBYEAR > 2021", query)
+        self.assertIn("PUBYEAR < 2027", query)
+        self.assertNotIn("PUBYEAR IS", query)
+
+    def test_more_scopus_pages_does_not_stop_when_total_equals_page_size(self):
+        self.assertTrue(
+            more_scopus_pages(page_len=25, page_size=25, next_start=25, reported_total=25)
+        )
+        self.assertTrue(
+            more_scopus_pages(page_len=25, page_size=25, next_start=25, reported_total=0)
+        )
+        self.assertTrue(
+            more_scopus_pages(page_len=25, page_size=25, next_start=25, reported_total=80)
+        )
+        self.assertFalse(
+            more_scopus_pages(page_len=25, page_size=25, next_start=100, reported_total=80)
+        )
+        self.assertFalse(
+            more_scopus_pages(page_len=10, page_size=25, next_start=25, reported_total=25)
+        )
+        self.assertFalse(
+            more_scopus_pages(page_len=0, page_size=25, next_start=25, reported_total=100)
+        )
 
     def test_author_search_without_gasu_filter_does_not_restrict_affiliation(self):
         query = build_query("Поиск по автору", "Alekseev", "", None, False)

@@ -56,9 +56,35 @@ GASU_CITY_MARKERS = (
 UNIVERSITY_TOKENS = ("univ", "university", "университет", "госуниверситет")
 
 
+SCOPUS_SEARCH_CAP = 5000
+
+
 def quoted(value: str) -> str:
     cleaned = (value or "").strip().replace('"', "")
     return f'"{cleaned}"'
+
+
+def more_scopus_pages(
+    *,
+    page_len: int,
+    page_size: int,
+    next_start: int,
+    reported_total: int | None,
+    hard_cap: int = SCOPUS_SEARCH_CAP,
+) -> bool:
+    """Нужна ли следующая страница Scopus Search.
+
+    COMPLETE-выдача часто ставит totalResults равным размеру первой страницы
+    (25). Тогда цикл «start >= total» обрывался на самых новых статьях —
+    за «последние 5 лет» оставался только текущий год.
+    """
+    if page_len <= 0 or page_len < page_size:
+        return False
+    if next_start >= hard_cap:
+        return False
+    if reported_total and reported_total > page_size and next_start >= reported_total:
+        return False
+    return True
 
 
 def normalize_orcid(value: str) -> str:

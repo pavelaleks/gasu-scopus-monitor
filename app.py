@@ -32,6 +32,7 @@ from gasu import (
     parse_authors,
     pick_scopus_authid,
     profile_display_name,
+    more_scopus_pages,
     query_targets_gasu,
     quoted,
     record_sort_key,
@@ -84,7 +85,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -264,15 +265,39 @@ def period_filter_widgets() -> tuple[str, int | None, int | None]:
         horizontal=True,
         key="time_filter_ui",
     )
+    time_filter = st.session_state.get("time_filter_ui") or time_filter
     start_year = None
     end_year = None
     if time_filter == "Диапазон лет":
         col1, col2 = st.columns(2)
         with col1:
-            start_year = st.number_input("С", min_value=1900, max_value=2100, value=2020, step=1)
+            start_year = st.number_input(
+                "С", min_value=1900, max_value=2100, value=2020, step=1, key="period_start"
+            )
         with col2:
-            end_year = st.number_input("По", min_value=1900, max_value=2100, value=datetime.now().year, step=1)
+            end_year = st.number_input(
+                "По",
+                min_value=1900,
+                max_value=2100,
+                value=datetime.now().year,
+                step=1,
+                key="period_end",
+            )
+        start_year = st.session_state.get("period_start", start_year)
+        end_year = st.session_state.get("period_end", end_year)
     return time_filter, start_year, end_year
+
+
+def period_span_label(date_filter: dict | None) -> str:
+    if not date_filter:
+        return "—"
+    lo = date_filter.get("year_start") or date_filter.get("year")
+    hi = date_filter.get("year_end") or date_filter.get("year")
+    if lo is None and hi is None:
+        return "—"
+    if lo == hi:
+        return str(lo)
+    return f"{lo}–{hi}"
 
 
 def papers_mode_search_hint(mode: str, contest_year: int) -> str:
@@ -660,9 +685,14 @@ def fetch_scopus_data(query: str, api_key: str, max_results: int | None) -> list
             if max_results and len(records) >= max_results:
                 break
         start += page_size
-        if start >= total or not entries:
-            break
         if max_results and len(records) >= max_results:
+            break
+        if not more_scopus_pages(
+            page_len=len(entries),
+            page_size=page_size,
+            next_start=start,
+            reported_total=total,
+        ):
             break
     records.sort(key=lambda item: item.get("cover_date") or "", reverse=True)
     return records
@@ -1282,10 +1312,13 @@ elif has_records:
         )
 
     slice_report = build_report(records)
+    requested = period_span_label(st.session_state.get("date_filter"))
     kpi1, kpi2, kpi3 = st.columns(3)
     kpi1.metric("Публикаций в срезе", slice_report.total)
-    kpi2.metric("Охват лет", slice_report.year_label)
+    kpi2.metric("Период", requested)
     kpi3.metric("Журналов и изданий", slice_report.unique_journals)
+    if requested != "—" and slice_report.year_label not in {requested, "—"}:
+        st.caption(f"В ответе Scopus годы {slice_report.year_label}.")
     if saved_mode == MODE_AUTHOR:
         st.caption(
             "Таблица — работы за выбранный период"

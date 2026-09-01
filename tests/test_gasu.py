@@ -14,12 +14,19 @@ from gasu import (
     entry_belongs_to_gasu,
     format_affiliations,
     gasu_affiliation_clause,
+    gasu_author_affil_clause,
     h_index_from_citation_counts,
     has_gasu_affiliation,
     match_authid_on_paper,
     more_scopus_pages,
     needs_author_enrichment,
     normalize_orcid,
+    paper_abstract_urls,
+    parse_author_count,
+    parse_crossref_authors,
+    merge_author_lists,
+    fill_truncated_authors_from_crossref,
+    crossref_work_url,
     orcid_id_query,
     parse_author_query,
     parse_author_retrieval,
@@ -167,6 +174,11 @@ class GasuQueryTests(unittest.TestCase):
         query = build_query("Поиск по автору", "Alekseev", "", None, True)
         self.assertIn("AFFILORG(", query)
         self.assertIn("Alekseev", query)
+        staff = gasu_author_affil_clause()
+        self.assertIn("AFFIL(", staff)
+        self.assertIn("Gorno-Altaisk State University", staff)
+        self.assertNotIn(AFFILIATION_ID, staff)
+        self.assertNotIn("AF-ID", staff)
 
     def test_since_founding_uses_1993(self):
         self.assertEqual(GASU_FOUNDED_YEAR, 1993)
@@ -365,6 +377,20 @@ class MultiAffiliationTests(unittest.TestCase):
 
     def test_needs_author_enrichment_when_list_is_truncated(self):
         self.assertFalse(needs_author_enrichment({"authors": [{"authid": "1"}]}))
+        self.assertFalse(
+            needs_author_enrichment(
+                {
+                    "scopus_id": "851",
+                    "author_count": 1,
+                    "authors": [{"surname": "Alekseev", "authid": "57200000001"}],
+                }
+            )
+        )
+        self.assertTrue(
+            needs_author_enrichment(
+                {"doi": "10.1016/j.foo.2020.01.001", "authors": [{"surname": "Alekseev"}]}
+            )
+        )
         self.assertTrue(
             needs_author_enrichment(
                 {"scopus_id": "851", "authors": [{"surname": "Alekseev", "authid": "57200000001"}]}
@@ -546,6 +572,99 @@ class MultiAffiliationTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertEqual(
+            truncated_author_paper_count(
+                [{"authors": [{"surname": "Solo"}], "author_count": 1}]
+            ),
+            0,
+        )
+        self.assertEqual(
+            truncated_author_paper_count(
+                [{"authors": [{"surname": "Alekseev"}], "author_count": 4}]
+            ),
+            1,
+        )
+
+    def test_paper_abstract_urls_try_eid_then_doi(self):
+        urls = paper_abstract_urls(
+            {
+                "scopus_id": "2-s2.0-85100000000",
+                "eid": "2-s2.0-85100000000",
+                "doi": "10.1016/j.foo.2020.01.001",
+            }
+        )
+        self.assertEqual(
+            urls[0],
+            "https://api.elsevier.com/content/abstract/eid/2-s2.0-85100000000",
+        )
+        self.assertEqual(
+            urls[-1],
+            "https://api.elsevier.com/content/abstract/doi/10.1016%2Fj.foo.2020.01.001",
+        )
+        self.assertEqual(len(urls), 2)
+        numeric = paper_abstract_urls({"scopus_id": "85100000000", "doi": "10.1/abc"})
+        self.assertEqual(
+            numeric[0],
+            "https://api.elsevier.com/content/abstract/scopus_id/85100000000",
+        )
+        self.assertEqual(parse_author_count({"author-count": {"@total": "5", "$": "5"}}), 5)
+        self.assertIsNone(parse_author_count({}))
+
+    def test_crossref_restores_junior_coauthor_for_rsf(self):
+        from report import rsf_candidates, rsf_eligibility_rows
+
+        payload = {
+            "message": {
+                "author": [
+                    {"family": "Frolov", "given": "I.N."},
+                    {"family": "Kudryavtsev", "given": "N.G."},
+                    {
+                        "family": "Safonova",
+                        "given": "Varvara Yu.",
+                        "ORCID": "https://orcid.org/0000-0002-0000-000X",
+                    },
+                ]
+            }
+        }
+        extra = parse_crossref_authors(payload)
+        self.assertEqual(
+            [item["surname"] for item in extra],
+            ["Frolov", "Kudryavtsev", "Safonova"],
+        )
+        self.assertEqual(extra[2]["orcid"], "0000-0002-0000-000X")
+        self.assertEqual(
+            crossref_work_url("https://doi.org/10.1016/j.foo.2020.01.001"),
+            "https://api.crossref.org/works/10.1016%2Fj.foo.2020.01.001",
+        )
+        records = [
+            {
+                "scopus_id": "85100000001",
+                "doi": "10.1016/j.foo.2020.01.001",
+                "author_count": 3,
+                "authors": [
+                    {"surname": "Frolov", "initials": "I.N.", "authid": "57200000011"}
+                ],
+            }
+        ]
+        self.assertTrue(needs_author_enrichment(records[0]))
+        filled = fill_truncated_authors_from_crossref(
+            records, lambda _doi: extra
+        )
+        self.assertEqual(filled, 1)
+        names = [item["surname"] for item in records[0]["authors"]]
+        self.assertEqual(names, ["Frolov", "Kudryavtsev", "Safonova"])
+        self.assertEqual(records[0]["authors"][0]["authid"], "57200000011")
+        self.assertEqual(
+            merge_author_lists(
+                [{"surname": "Frolov", "authid": "1"}],
+                extra,
+            )[0]["authid"],
+            "1",
+        )
+        rows = rsf_eligibility_rows(rsf_candidates(records), 1)
+        authors = [row["Автор"] for row in rows]
+        self.assertTrue(any("Safonova" in name for name in authors))
+        self.assertTrue(any("Frolov" in name for name in authors))
 
     def test_records_sort_by_surname_then_newest_year(self):
         records = [

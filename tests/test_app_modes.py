@@ -61,6 +61,18 @@ class AppModeTests(unittest.TestCase):
         self.assertNotIn("Загружаем профили Scopus: Author ID, ORCID, h-индекс", text)
         self.assertIn("Загружаем профиль Scopus...", text)
 
+    def test_all_modes_try_abstract_retrieval_for_coauthors(self):
+        text = APP_PATH.read_text(encoding="utf-8")
+        self.assertIn("Дополняем соавторов по карточкам статей и DOI, если Search отдал только первого...", text)
+        self.assertIn('{"view": "FULL"}', text)
+        self.assertIn("fetch_crossref_authors", text)
+        self.assertIn("add_gasu_staff_to_rsf", text)
+        self.assertIn("Ищем сотрудников ГАГУ в Scopus — не только первых авторов статей...", text)
+        self.assertNotIn("if truncated and saved_mode in {MODE_UNIVERSITY, MODE_RSF}:", text)
+        enrich_idx = text.index("enrich_record_authors(records, api_key)")
+        authid_guard = text.find("if not authid_ready:", 0, enrich_idx)
+        self.assertEqual(authid_guard, -1)
+
 
     def test_last_five_years_radio_stays_selected(self):
         at = AppTest.from_file(str(APP_PATH), default_timeout=20)

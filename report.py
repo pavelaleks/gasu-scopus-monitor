@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 
-from gasu import is_gasu_name
+from gasu import first_initial, is_gasu_name
 from rsf import rsf_name_excluded
 
 
@@ -416,6 +416,83 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
         rows.append(_candidate_row(bucket, account="только статьи с ГАГУ"))
     rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
     return rows
+
+
+def rsf_candidate_from_profile(profile: dict, *, gasu_n: int, total: int) -> dict:
+    """Строка РНФ из Author Search: человек с профилем ГАГУ, даже если не первый автор."""
+    bucket = _empty_author_bucket()
+    name = author_display_name(profile) or (profile.get("surname") or "").strip()
+    if name:
+        bucket["names"][name] += 1
+    bucket["surname"] = (profile.get("surname") or "").strip()
+    bucket["given"] = (profile.get("given") or "").strip()
+    bucket["initials"] = (profile.get("initials") or "").strip()
+    bucket["authid"] = (profile.get("authid") or "").strip()
+    bucket["orcid"] = profile.get("orcid") or ""
+    bucket["profile_affil"] = profile.get("profile_affil") or ""
+    bucket["h_index"] = profile.get("h_index")
+    bucket["documents"] = profile.get("documents")
+    bucket["cited_by"] = profile.get("cited_by")
+    bucket["citations"] = profile.get("citations")
+    bucket["gasu_n"] = int(gasu_n)
+    bucket["total"] = max(int(total), int(gasu_n))
+    return _candidate_row(bucket, account="профиль Scopus (AU-ID)")
+
+
+def _rsf_existing_for_profile(candidates: list[dict], profile: dict) -> dict | None:
+    authid = (profile.get("authid") or "").strip()
+    if authid:
+        for row in candidates:
+            if (row.get("authid") or "").strip() == authid:
+                return row
+    surname = (profile.get("surname") or "").strip().lower()
+    if not surname:
+        return None
+    initial = first_initial(profile.get("initials") or "", profile.get("given") or "").lower()
+    hits: list[dict] = []
+    for row in candidates:
+        if (row.get("surname") or "").strip().lower() != surname:
+            continue
+        got = first_initial(row.get("initials") or "", row.get("given") or "").lower()
+        if initial and got and initial != got:
+            continue
+        hits.append(row)
+    return hits[0] if len(hits) == 1 else None
+
+
+def supplement_rsf_with_profiles(candidates: list[dict], profiles: list[dict], counts) -> tuple[list[dict], int]:
+    """Добавляет сотрудников ГАГУ, которых нет среди первых авторов статей.
+
+    counts(authid) -> (статей с ГАГУ в окне, всего Scopus в окне).
+    Без статьи ГАГУ в окне человека не берём.
+    """
+    rows = list(candidates or [])
+    added = 0
+    for profile in profiles or []:
+        surname = (profile.get("surname") or "").strip()
+        authid = (profile.get("authid") or "").strip()
+        if not authid or not authid.isdigit():
+            continue
+        if rsf_name_excluded(surname) or rsf_name_excluded(author_display_name(profile)):
+            continue
+        existing = _rsf_existing_for_profile(rows, profile)
+        if existing is not None:
+            if not (existing.get("authid") or "").strip():
+                existing["authid"] = authid
+            if profile.get("orcid") and not existing.get("orcid"):
+                existing["orcid"] = profile.get("orcid")
+                existing["ORCID"] = profile.get("orcid")
+            continue
+        try:
+            gasu_n, total = counts(authid)
+        except Exception:
+            continue
+        if int(gasu_n or 0) < 1:
+            continue
+        rows.append(rsf_candidate_from_profile(profile, gasu_n=int(gasu_n), total=int(total or 0)))
+        added += 1
+    rows.sort(key=lambda row: (-int(row.get("Всего Scopus") or 0), -int(row.get("С ГАГУ") or 0), str(row.get("Автор") or "").lower()))
+    return rows, added
 
 
 def apply_author_total(candidate: dict, total: int, account: str = "все статьи автора") -> dict:

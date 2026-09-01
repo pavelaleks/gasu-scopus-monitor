@@ -85,7 +85,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.10.2"
 APP_UPDATED_FALLBACK = "31.08.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -961,16 +961,19 @@ def render_report_block(
         )
         author_rows = top_authors(records, int(top_n))
         if author_rows:
+            table = pd.DataFrame(author_rows)
+            hide = [col for col in ("h-индекс", "Документов", "Цитирований") if col in table.columns]
+            if hide:
+                table = table.drop(columns=hide)
             st.dataframe(
-                pd.DataFrame(author_rows),
+                table,
                 hide_index=True,
                 use_container_width=True,
             )
             st.caption(
                 f"{report_scope_label(records, university=True)}. "
                 "Соавторство считается: статья входит в показатель каждого автора. "
-                "Q1–Q4 — квартиль журнала этой статьи. "
-                "Author ID, ORCID, h-индекс, документы и цитирования — из профиля Scopus, не из среза."
+                "Q1–Q4 — квартиль журнала этой статьи в этом срезе, не карьера автора."
             )
 
     if report.top_journals:
@@ -1187,9 +1190,10 @@ if search_clicked:
                 identity = "surname"
                 query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
         if target_profile.get("authid"):
-            extra = fetch_author_metrics(target_profile["authid"], api_key)
-            if extra:
-                apply_author_profile(target_profile, extra)
+            with st.spinner("Загружаем профиль Scopus..."):
+                extra = fetch_author_metrics(target_profile["authid"], api_key)
+                if extra:
+                    apply_author_profile(target_profile, extra)
     else:
         query = build_query(mode, author_last, author_orcid, date_filter, only_gasu)
     with st.spinner("Идет поиск в Scopus..."):
@@ -1235,8 +1239,9 @@ if search_clicked:
     if mode in {MODE_UNIVERSITY, MODE_RSF}:
         with st.spinner("Дополняем авторов по карточкам статей, если API это позволяет..."):
             enrich_record_authors(records, api_key)
-        with st.spinner("Загружаем профили Scopus: Author ID, ORCID, h-индекс..."):
-            stamp_author_profiles(records, api_key)
+        if mode == MODE_RSF:
+            with st.spinner("Сопоставляем авторов с профилями Scopus..."):
+                stamp_author_profiles(records, api_key)
         st.session_state.pop("target_profile", None)
     else:
         st.session_state["target_profile"] = target_profile
@@ -1303,9 +1308,7 @@ elif has_records:
                 + (f" Ошибки запроса: {failed}." if failed else "")
             )
 
-    if saved_mode == MODE_AUTHOR and (
-        profile.get("authid") or profile.get("orcid") or profile.get("h_index") is not None
-    ):
+    if saved_mode == MODE_AUTHOR:
         render_scopus_profile_card(
             profile,
             fallback_name=st.session_state.get("author_last") or "",

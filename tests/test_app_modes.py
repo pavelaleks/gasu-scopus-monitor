@@ -56,6 +56,11 @@ class AppModeTests(unittest.TestCase):
         self.assertIn("Автор", {item.label for item in at.text_input})
         self.assertNotIn("Фамилия", {item.label for item in at.text_input})
 
+    def test_university_search_does_not_advertise_hindex_spinner(self):
+        text = APP_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("Загружаем профили Scopus: Author ID, ORCID, h-индекс", text)
+        self.assertIn("Загружаем профиль Scopus...", text)
+
 
     def test_last_five_years_radio_stays_selected(self):
         at = AppTest.from_file(str(APP_PATH), default_timeout=20)

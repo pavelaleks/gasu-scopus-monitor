@@ -220,6 +220,22 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(by_name["Alekseev P.V."]["С ГАГУ"], 8)
         self.assertEqual(by_name["Alekseev P.V."]["Author ID"], "57200000001")
         self.assertIn("ORCID", by_name["Alekseev P.V."])
+        self.assertEqual(
+            list(by_name["Alekseev P.V."].keys()),
+            [
+                "Автор",
+                "Author ID",
+                "ORCID",
+                "Всего Scopus",
+                "С ГАГУ",
+                "Q1",
+                "Q2",
+                "Q3",
+                "Q4",
+                "Без квартиля",
+                "Учёт",
+            ],
+        )
         self.assertEqual(by_name["Kyrov V.A."]["С ГАГУ"], 8)
 
     def test_rsf_merges_kyrov_latin_and_cyrillic_as_one_person(self):

@@ -60,6 +60,15 @@ class AppModeTests(unittest.TestCase):
         text = APP_PATH.read_text(encoding="utf-8")
         self.assertNotIn("Загружаем профили Scopus: Author ID, ORCID, h-индекс", text)
         self.assertIn("Загружаем профиль Scopus...", text)
+        self.assertNotIn(
+            "Author Search + Retrieval: Author ID, ORCID, h-index и счётчики профиля.",
+            text,
+        )
+        grant_block = text.split("if records and grant_min:")[1].split("elif records:")[0]
+        self.assertIn("fill_subject_areas(records, api_key)", grant_block)
+        self.assertIn("Определяем области знаний по журналам Scopus...", grant_block)
+        before_except = grant_block.split("except Exception:")[0]
+        self.assertNotIn('rec.setdefault("subject_areas", "Не указано")', before_except)
 
     def test_all_modes_try_abstract_retrieval_for_coauthors(self):
         text = APP_PATH.read_text(encoding="utf-8")

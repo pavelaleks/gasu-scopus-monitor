@@ -668,15 +668,22 @@ def apply_author_total(candidate: dict, total: int, account: str = "все ст�
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
-    hide = {"surname", "given", "initials", "sample_scopus_id", "orcid", "paper_ids"}
-    order = (
-        "Автор",
-        "Author ID",
-        "ORCID",
+    hide = {
+        "surname",
+        "given",
+        "initials",
+        "sample_scopus_id",
+        "orcid",
+        "paper_ids",
         "h-индекс",
         "Документов",
         "Цитирований",
         "Аффилиация",
+    }
+    order = (
+        "Автор",
+        "Author ID",
+        "ORCID",
         "Всего Scopus",
         "С ГАГУ",
         "Q1",

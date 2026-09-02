@@ -113,7 +113,7 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.10"
+APP_VERSION = "1.10.11"
 APP_UPDATED_FALLBACK = "02.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
@@ -779,7 +779,7 @@ def complete_author_profile(
 
 
 def stamp_author_profiles(records: list[dict], api_key: str) -> int:
-    """Author Search + Retrieval: Author ID, ORCID, h-index и счётчики профиля."""
+    """Author Search: Author ID и ORCID. Метрики профиля не трогаем — в РНФ их нет в таблице."""
     groups: dict[str, list[dict]] = {}
     for rec in records:
         for author in rec.get("authors") or []:
@@ -824,26 +824,6 @@ def stamp_author_profiles(records: list[dict], api_key: str) -> int:
                 for author in groups[key]:
                     apply_author_profile(author, profile)
 
-    authids = sorted({(p.get("authid") or "") for p in profiles.values() if p.get("authid")})
-    if not authids:
-        return 0
-    metrics: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(fetch_author_metrics, authid, api_key): authid for authid in authids}
-        for fut in as_completed(futures):
-            authid = futures[fut]
-            try:
-                data = fut.result() or {}
-            except Exception:
-                data = {}
-            if data:
-                metrics[authid] = data
-    if metrics:
-        for rec in records:
-            for author in rec.get("authors") or []:
-                extra = metrics.get((author.get("authid") or "").strip())
-                if extra:
-                    apply_author_profile(author, extra)
     return len({p.get("authid") for p in profiles.values() if p.get("authid")})
 
 
@@ -1444,9 +1424,13 @@ if search_clicked:
             st.stop()
     if records and grant_min:
         records = [rec for rec in records if record_in_rsf_window(rec, window)]
-        for rec in records:
-            rec.setdefault("subject_abbrevs", [])
-            rec.setdefault("subject_areas", "Не указано")
+        with st.spinner("Определяем области знаний по журналам Scopus..."):
+            try:
+                fill_subject_areas(records, api_key)
+            except Exception:
+                for rec in records:
+                    rec.setdefault("subject_abbrevs", [])
+                    rec.setdefault("subject_areas", "Не указано")
         try:
             attach_scimago(records)
         except Exception:
@@ -1560,6 +1544,12 @@ elif has_records:
         g2.metric("Статей ГАГУ в окне", len(records))
         if grant_rows:
             st.dataframe(pd.DataFrame(grant_rows), hide_index=True, use_container_width=True)
+            st.caption(
+                "«Всего Scopus» — все статьи автора за грантовый период; "
+                "«С ГАГУ» — только работы с аффилиацией ГАГУ. "
+                "h-индекс и карьерные метрики не запрашиваем — это тормозит поиск, "
+                "а Author Retrieval на Cloud часто закрыт."
+            )
         else:
             st.info("Никто не набрал порог по всем статьям Scopus в этом окне.")
         failed = int(st.session_state.get("grant_failed") or 0)

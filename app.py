@@ -113,8 +113,8 @@ SEARCH_FIELDS = (
     "prism:issn,prism:eIssn,author,affiliation,citedby-count"
 )
 ENV_PATH = Path(__file__).with_name(".env")
-APP_VERSION = "1.10.9"
-APP_UPDATED_FALLBACK = "01.09.2026"
+APP_VERSION = "1.10.10"
+APP_UPDATED_FALLBACK = "02.09.2026"
 MODE_UNIVERSITY = "Мониторинг ГАГУ"
 MODE_RSF = "РНФ"
 MODE_AUTHOR = "Поиск по автору"

@@ -13,6 +13,7 @@ from gasu import (
     build_query,
     entry_belongs_to_gasu,
     format_affiliations,
+    fold_surname,
     gasu_affiliation_clause,
     gasu_author_affil_clause,
     h_index_from_citation_counts,
@@ -179,6 +180,11 @@ class GasuQueryTests(unittest.TestCase):
         self.assertIn("Gorno-Altaisk State University", staff)
         self.assertNotIn(AFFILIATION_ID, staff)
         self.assertNotIn("AF-ID", staff)
+
+    def test_fold_surname_equates_kyrov_and_cyrillic(self):
+        self.assertEqual(fold_surname("Kyrov"), fold_surname("Кыров"))
+        self.assertEqual(fold_surname("Safonova"), fold_surname("Сафонова"))
+        self.assertNotEqual(fold_surname("Kyrov"), fold_surname("Kudryavtsev"))
 
     def test_since_founding_uses_1993(self):
         self.assertEqual(GASU_FOUNDED_YEAR, 1993)

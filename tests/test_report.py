@@ -222,6 +222,36 @@ class ReportTests(unittest.TestCase):
         self.assertIn("ORCID", by_name["Alekseev P.V."])
         self.assertEqual(by_name["Kyrov V.A."]["С ГАГУ"], 8)
 
+    def test_rsf_merges_kyrov_latin_and_cyrillic_as_one_person(self):
+        oid = "0000-0002-1234-567X"
+        records = [
+            {
+                "scopus_id": "1",
+                "authors": [{"surname": "Kyrov", "initials": "V.A.", "orcid": oid}],
+            },
+            {
+                "scopus_id": "2",
+                "authors": [{"surname": "Кыров", "initials": "В.А.", "orcid": f"https://orcid.org/{oid}"}],
+            },
+            {
+                "scopus_id": "3",
+                "authors": [{"surname": "Kyrov", "initials": "V.A."}],
+            },
+            {
+                "scopus_id": "4",
+                "authors": [{"surname": "Кыров", "initials": "V.A.", "authid": "57201111111"}],
+            },
+        ]
+        rows = rsf_candidates(records)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["С ГАГУ"], 4)
+        self.assertIn("Кыров", rows[0]["Автор"])
+        self.assertEqual(rows[0]["orcid"], oid.lower())
+        shown = rsf_eligibility_rows(rows, 1)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0]["ORCID"], oid.lower())
+        self.assertNotIn("paper_ids", shown[0])
+
     def test_rsf_includes_safonova_when_she_is_not_first_author(self):
         records = [
             {

@@ -100,6 +100,61 @@ def normalize_orcid(value: str) -> str:
 
 _ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$", re.IGNORECASE)
 
+_RU_TO_LAT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def orcid_identity(value: str) -> str:
+    oid = normalize_orcid(value or "")
+    return oid.lower() if _ORCID_RE.match(oid) else ""
+
+
+def fold_surname(surname: str) -> str:
+    """Kyrov и Кыров — одна фамилия для склейки авторов."""
+    text = (surname or "").strip().lower().replace("ё", "е")
+    if not text:
+        return ""
+    if any("а" <= ch <= "я" or ch == "ё" for ch in text):
+        return "".join(_RU_TO_LAT.get(ch, ch) for ch in text)
+    return text
+
+
+def name_has_cyrillic(name: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in name or "")
+
 
 def parse_author_query(value: str) -> dict:
     """Одно поле: ORCID, Scopus Author ID или фамилия."""

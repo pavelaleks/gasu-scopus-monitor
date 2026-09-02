@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 
-from gasu import first_initial, is_gasu_name
+from gasu import first_initial, fold_surname, is_gasu_name, name_has_cyrillic, orcid_identity
 from rsf import rsf_name_excluded
 
 
@@ -128,16 +128,27 @@ def author_display_name(author: dict) -> str:
     return surname
 
 
+def preferred_display_name(names: Counter) -> str:
+    if not names:
+        return ""
+    return max(
+        names,
+        key=lambda name: (1 if name_has_cyrillic(name) else 0, names[name], len(name)),
+    )
+
+
 def author_merge_key(author: dict) -> str | None:
+    oid = orcid_identity(author.get("orcid") or author.get("ORCID") or "")
+    if oid:
+        return f"orcid|{oid}"
     authid = (author.get("authid") or "").strip()
     if authid.isdigit():
         return f"id|{authid}"
-    surname = (author.get("surname") or "").strip()
+    surname = fold_surname(author.get("surname") or "")
     if not surname:
         return None
-    initials = _author_initials(author)
-    first = next((ch.lower() for ch in initials if ch.isalpha()), "")
-    return f"{surname.lower()}|{first}"
+    first = fold_surname(first_initial(author.get("initials") or "", author.get("given") or ""))[:1]
+    return f"{surname}|{first}"
 
 
 def report_who_label(records: list[dict], *, university: bool, author_last: str = "") -> str:
@@ -221,7 +232,7 @@ def author_stats(records: list[dict], *, only_gasu: bool = False, limit: int | N
                 bucket[quartile] += 1
     rows = []
     for bucket in buckets.values():
-        name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
+        name = preferred_display_name(bucket["names"])
         share = round((bucket["Q1"] + bucket["Q2"]) / bucket["n"] * 100, 1) if bucket["n"] else 0.0
         rows.append(
             {
@@ -272,6 +283,7 @@ def _empty_author_bucket() -> dict:
         "cited_by": None,
         "citations": None,
         "profile_affil": "",
+        "paper_ids": set(),
     }
 
 
@@ -284,7 +296,7 @@ def _add_quartile(bucket: dict, record: dict) -> None:
 
 
 def _candidate_row(bucket: dict, *, account: str) -> dict:
-    name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
+    name = preferred_display_name(bucket["names"])
     total = int(bucket.get("total") or bucket["gasu_n"])
     gasu_n = int(bucket["gasu_n"])
     parts = name.split(None, 1)
@@ -309,21 +321,35 @@ def _candidate_row(bucket: dict, *, account: str) -> dict:
         "Q4": bucket["Q4"],
         "Без квартиля": bucket["none"],
         "Учёт": account,
+        "paper_ids": set(bucket.get("paper_ids") or ()),
     }
 
 
 def _merge_author_bucket(dest: dict, src: dict) -> None:
+    dest_ids = dest.setdefault("paper_ids", set())
+    src_ids = set(src.get("paper_ids") or ())
+    overlap = bool(dest_ids and src_ids and dest_ids & src_ids)
+    dest_ids |= src_ids
     dest["names"].update(src["names"])
-    dest["gasu_n"] += src["gasu_n"]
-    dest["Q1"] += src["Q1"]
-    dest["Q2"] += src["Q2"]
-    dest["Q3"] += src["Q3"]
-    dest["Q4"] += src["Q4"]
-    dest["none"] += src["none"]
-    dest["flags"].update(src["flags"])
+    if dest_ids:
+        dest["gasu_n"] = max(len(dest_ids), int(dest.get("gasu_n") or 0), int(src.get("gasu_n") or 0))
+    else:
+        dest["gasu_n"] = max(int(dest.get("gasu_n") or 0), int(src.get("gasu_n") or 0))
+    if overlap:
+        for key in ("Q1", "Q2", "Q3", "Q4", "none"):
+            dest[key] = max(int(dest.get(key) or 0), int(src.get(key) or 0))
+    else:
+        dest["Q1"] += src.get("Q1") or 0
+        dest["Q2"] += src.get("Q2") or 0
+        dest["Q3"] += src.get("Q3") or 0
+        dest["Q4"] += src.get("Q4") or 0
+        dest["none"] += src.get("none") or 0
+    dest["flags"].update(src.get("flags") or ())
     if src.get("authid") and not dest.get("authid"):
         dest["authid"] = src["authid"]
-    if src.get("surname") and not dest.get("surname"):
+    if name_has_cyrillic(src.get("surname") or "") and not name_has_cyrillic(dest.get("surname") or ""):
+        dest["surname"] = src.get("surname") or dest.get("surname")
+    elif src.get("surname") and not dest.get("surname"):
         dest["surname"] = src["surname"]
     if src.get("given") and not dest.get("given"):
         dest["given"] = src["given"]
@@ -341,32 +367,63 @@ def _merge_author_bucket(dest: dict, src: dict) -> None:
 
 
 def _coalesce_author_buckets(buckets: dict[str, dict]) -> None:
-    """Склеить одного человека: с ID и без, «Alekseev P.» и «Alekseev P.V.»."""
-    by_surname: dict[str, list[str]] = {}
-    for key, bucket in buckets.items():
-        if not bucket["names"]:
-            continue
-        name = max(bucket["names"], key=lambda item: (len(item), bucket["names"][item]))
-        surname = name.split()[0].lower()
-        by_surname.setdefault(surname, []).append(key)
-    for keys in by_surname.values():
-        id_keys = [key for key in keys if key.startswith("id|")]
-        other = [key for key in keys if not key.startswith("id|")]
-        if len(id_keys) == 1 and other:
-            dest = buckets[id_keys[0]]
-            for src_key in other:
-                _merge_author_bucket(dest, buckets.pop(src_key))
-            continue
-        if id_keys:
-            continue
-        initials = {key.split("|", 1)[-1] for key in keys if "|" in key}
-        initials.discard("")
-        if len(keys) > 1 and len(initials) <= 1:
-            dest_key = next((key for key in keys if key.split("|", 1)[-1]), keys[0])
+    """Склеить одного человека: ORCID, Author ID, Kyrov/Кыров, «Alekseev P.» и «Alekseev P.V.»."""
+
+    def merge_key_lists(groups: dict[str, list[str]]) -> None:
+        for keys in groups.values():
+            present = [key for key in keys if key in buckets]
+            if len(present) < 2:
+                continue
+            dest_key = next(
+                (key for key in present if key.startswith("orcid|")),
+                next((key for key in present if key.startswith("id|")), present[0]),
+            )
             dest = buckets[dest_key]
-            for src_key in keys:
-                if src_key != dest_key:
+            for src_key in present:
+                if src_key != dest_key and src_key in buckets:
                     _merge_author_bucket(dest, buckets.pop(src_key))
+
+    by_orcid: dict[str, list[str]] = {}
+    for key, bucket in list(buckets.items()):
+        oid = orcid_identity(bucket.get("orcid") or "")
+        if oid:
+            by_orcid.setdefault(oid, []).append(key)
+    merge_key_lists(by_orcid)
+
+    by_authid: dict[str, list[str]] = {}
+    for key, bucket in list(buckets.items()):
+        authid = (bucket.get("authid") or "").strip()
+        if authid.isdigit():
+            by_authid.setdefault(authid, []).append(key)
+    merge_key_lists(by_authid)
+
+    by_fold: dict[str, list[str]] = {}
+    for key, bucket in list(buckets.items()):
+        surname = fold_surname(bucket.get("surname") or "")
+        if not surname and bucket.get("names"):
+            surname = fold_surname(preferred_display_name(bucket["names"]).split()[0])
+        if not surname:
+            continue
+        initial = first_initial(bucket.get("initials") or "", bucket.get("given") or "")
+        by_fold.setdefault(f"{surname}|{fold_surname(initial)[:1]}", []).append(key)
+    for keys in by_fold.values():
+        present = [key for key in keys if key in buckets]
+        if len(present) < 2:
+            continue
+        authids = {(buckets[key].get("authid") or "").strip() for key in present}
+        authids.discard("")
+        orcids = {orcid_identity(buckets[key].get("orcid") or "") for key in present}
+        orcids.discard("")
+        if len(authids) > 1 or len(orcids) > 1:
+            continue
+        dest_key = next(
+            (key for key in present if key.startswith("orcid|") or key.startswith("id|")),
+            present[0],
+        )
+        dest = buckets[dest_key]
+        for src_key in present:
+            if src_key != dest_key and src_key in buckets:
+                _merge_author_bucket(dest, buckets.pop(src_key))
 
 
 def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
@@ -387,8 +444,12 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
                 bucket = _empty_author_bucket()
                 buckets[key] = bucket
             bucket["names"][name or (author.get("surname") or "")] += 1
-            if author.get("surname") and not bucket.get("surname"):
-                bucket["surname"] = (author.get("surname") or "").strip()
+            if author.get("surname"):
+                incoming = (author.get("surname") or "").strip()
+                if not bucket.get("surname") or (
+                    name_has_cyrillic(incoming) and not name_has_cyrillic(bucket.get("surname") or "")
+                ):
+                    bucket["surname"] = incoming
             if author.get("given"):
                 bucket["given"] = (author.get("given") or "").strip()
             if author.get("initials"):
@@ -396,14 +457,17 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
             authid = (author.get("authid") or "").strip()
             if authid.isdigit():
                 bucket["authid"] = authid
-            if author.get("orcid") and not bucket.get("orcid"):
-                bucket["orcid"] = author.get("orcid") or ""
+            oid = orcid_identity(author.get("orcid") or author.get("ORCID") or "")
+            if oid and not bucket.get("orcid"):
+                bucket["orcid"] = oid
             if author.get("profile_affil") and not bucket.get("profile_affil"):
                 bucket["profile_affil"] = author.get("profile_affil") or ""
-            for key in ("h_index", "documents", "cited_by", "citations"):
-                if bucket.get(key) is None and author.get(key) is not None:
-                    bucket[key] = author.get(key)
-            sid = (rec.get("scopus_id") or "").strip()
+            for field in ("h_index", "documents", "cited_by", "citations"):
+                if bucket.get(field) is None and author.get(field) is not None:
+                    bucket[field] = author.get(field)
+            sid = (rec.get("scopus_id") or rec.get("doi") or rec.get("title") or "").strip()
+            if sid:
+                bucket["paper_ids"].add(sid)
             if sid and not bucket.get("sample_scopus_id"):
                 bucket["sample_scopus_id"] = sid
             bucket["flags"].add(author.get("from_gasu"))
@@ -412,10 +476,99 @@ def rsf_candidates(gasu_records: list[dict]) -> list[dict]:
     _coalesce_author_buckets(buckets)
     rows = []
     for bucket in buckets.values():
+        if bucket.get("paper_ids"):
+            bucket["gasu_n"] = len(bucket["paper_ids"])
         bucket["total"] = bucket["gasu_n"]
         rows.append(_candidate_row(bucket, account="только статьи с ГАГУ"))
     rows.sort(key=lambda row: (-row["Всего Scopus"], -row["С ГАГУ"], row["Автор"].lower()))
-    return rows
+    return dedupe_rsf_candidates(rows)
+
+
+def _rsf_row_orcid(row: dict) -> str:
+    return orcid_identity(row.get("orcid") or row.get("ORCID") or "")
+
+
+def _merge_rsf_rows(dest: dict, src: dict) -> None:
+    dest_ids = set(dest.get("paper_ids") or ())
+    src_ids = set(src.get("paper_ids") or ())
+    overlap = bool(dest_ids and src_ids and dest_ids & src_ids)
+    dest_ids |= src_ids
+    dest["paper_ids"] = dest_ids
+    if dest_ids:
+        dest["С ГАГУ"] = max(len(dest_ids), int(dest.get("С ГАГУ") or 0), int(src.get("С ГАГУ") or 0))
+    else:
+        dest["С ГАГУ"] = max(int(dest.get("С ГАГУ") or 0), int(src.get("С ГАГУ") or 0))
+    dest["Всего Scopus"] = max(int(dest.get("Всего Scopus") or 0), int(src.get("Всего Scopus") or 0), int(dest["С ГАГУ"]))
+    if not dest.get("authid") and src.get("authid"):
+        dest["authid"] = src.get("authid")
+    oid = _rsf_row_orcid(src) or _rsf_row_orcid(dest)
+    if oid:
+        dest["orcid"] = oid
+        dest["ORCID"] = oid
+    if name_has_cyrillic(src.get("Автор") or "") and not name_has_cyrillic(dest.get("Автор") or ""):
+        dest["Автор"] = src.get("Автор") or dest.get("Автор")
+        dest["surname"] = src.get("surname") or dest.get("surname")
+        dest["given"] = src.get("given") or dest.get("given")
+        dest["initials"] = src.get("initials") or dest.get("initials")
+    if src.get("profile_affil") and not dest.get("Аффилиация"):
+        dest["Аффилиация"] = src.get("profile_affil") or src.get("Аффилиация") or dest.get("Аффилиация")
+    if overlap:
+        for key in ("Q1", "Q2", "Q3", "Q4", "Без квартиля"):
+            dest[key] = max(int(dest.get(key) or 0), int(src.get(key) or 0))
+    else:
+        for key in ("Q1", "Q2", "Q3", "Q4", "Без квартиля"):
+            dest[key] = int(dest.get(key) or 0) + int(src.get(key) or 0)
+
+
+def _row_surname(row: dict) -> str:
+    surname = (row.get("surname") or "").strip()
+    if surname:
+        return surname
+    return (str(row.get("Автор") or "").split() or [""])[0]
+
+
+def dedupe_rsf_candidates(rows: list[dict]) -> list[dict]:
+    """Kyrov и Кыров с одним ORCID / Author ID — одна строка."""
+    merged: list[dict] = []
+
+    def find_match(row: dict) -> dict | None:
+        oid = _rsf_row_orcid(row)
+        authid = (row.get("authid") or "").strip()
+        folded = fold_surname(_row_surname(row))
+        initial = fold_surname(first_initial(row.get("initials") or "", row.get("given") or ""))[:1]
+        for existing in merged:
+            if oid and _rsf_row_orcid(existing) == oid:
+                return existing
+            if authid and (existing.get("authid") or "").strip() == authid:
+                return existing
+        if folded:
+            hits = []
+            for existing in merged:
+                if fold_surname(_row_surname(existing)) != folded:
+                    continue
+                exist_ini = fold_surname(first_initial(existing.get("initials") or "", existing.get("given") or ""))[:1]
+                if initial and exist_ini and initial != exist_ini:
+                    continue
+                exist_oid = _rsf_row_orcid(existing)
+                exist_id = (existing.get("authid") or "").strip()
+                if oid and exist_oid and oid != exist_oid:
+                    continue
+                if authid and exist_id and authid != exist_id:
+                    continue
+                hits.append(existing)
+            if len(hits) == 1:
+                return hits[0]
+        return None
+
+    for row in rows or []:
+        item = dict(row)
+        match = find_match(item)
+        if match is None:
+            merged.append(item)
+        else:
+            _merge_rsf_rows(match, item)
+    merged.sort(key=lambda row: (-int(row.get("Всего Scopus") or 0), -int(row.get("С ГАГУ") or 0), str(row.get("Автор") or "").lower()))
+    return merged
 
 
 def rsf_candidate_from_profile(profile: dict, *, gasu_n: int, total: int) -> dict:
@@ -428,7 +581,7 @@ def rsf_candidate_from_profile(profile: dict, *, gasu_n: int, total: int) -> dic
     bucket["given"] = (profile.get("given") or "").strip()
     bucket["initials"] = (profile.get("initials") or "").strip()
     bucket["authid"] = (profile.get("authid") or "").strip()
-    bucket["orcid"] = profile.get("orcid") or ""
+    bucket["orcid"] = orcid_identity(profile.get("orcid") or "")
     bucket["profile_affil"] = profile.get("profile_affil") or ""
     bucket["h_index"] = profile.get("h_index")
     bucket["documents"] = profile.get("documents")
@@ -440,20 +593,26 @@ def rsf_candidate_from_profile(profile: dict, *, gasu_n: int, total: int) -> dic
 
 
 def _rsf_existing_for_profile(candidates: list[dict], profile: dict) -> dict | None:
+    oid = orcid_identity(profile.get("orcid") or "")
+    if oid:
+        for row in candidates:
+            if _rsf_row_orcid(row) == oid:
+                return row
     authid = (profile.get("authid") or "").strip()
     if authid:
         for row in candidates:
             if (row.get("authid") or "").strip() == authid:
                 return row
-    surname = (profile.get("surname") or "").strip().lower()
-    if not surname:
+    folded = fold_surname(profile.get("surname") or "")
+    if not folded:
         return None
-    initial = first_initial(profile.get("initials") or "", profile.get("given") or "").lower()
+    initial = fold_surname(first_initial(profile.get("initials") or "", profile.get("given") or ""))[:1]
     hits: list[dict] = []
     for row in candidates:
-        if (row.get("surname") or "").strip().lower() != surname:
+        row_fold = fold_surname(_row_surname(row))
+        if row_fold != folded:
             continue
-        got = first_initial(row.get("initials") or "", row.get("given") or "").lower()
+        got = fold_surname(first_initial(row.get("initials") or "", row.get("given") or ""))[:1]
         if initial and got and initial != got:
             continue
         hits.append(row)
@@ -482,6 +641,10 @@ def supplement_rsf_with_profiles(candidates: list[dict], profiles: list[dict], c
             if profile.get("orcid") and not existing.get("orcid"):
                 existing["orcid"] = profile.get("orcid")
                 existing["ORCID"] = profile.get("orcid")
+            profile_name = author_display_name(profile)
+            if name_has_cyrillic(profile_name) and not name_has_cyrillic(existing.get("Автор") or ""):
+                existing["Автор"] = profile_name
+                existing["surname"] = surname or existing.get("surname")
             continue
         try:
             gasu_n, total = counts(authid)
@@ -492,6 +655,7 @@ def supplement_rsf_with_profiles(candidates: list[dict], profiles: list[dict], c
         rows.append(rsf_candidate_from_profile(profile, gasu_n=int(gasu_n), total=int(total or 0)))
         added += 1
     rows.sort(key=lambda row: (-int(row.get("Всего Scopus") or 0), -int(row.get("С ГАГУ") or 0), str(row.get("Автор") or "").lower()))
+    rows = dedupe_rsf_candidates(rows)
     return rows, added
 
 
@@ -504,7 +668,7 @@ def apply_author_total(candidate: dict, total: int, account: str = "все ст�
 
 
 def rsf_eligibility_rows(candidates: list[dict], min_papers: int) -> list[dict]:
-    hide = {"surname", "given", "initials", "sample_scopus_id", "orcid"}
+    hide = {"surname", "given", "initials", "sample_scopus_id", "orcid", "paper_ids"}
     order = (
         "Автор",
         "Author ID",
